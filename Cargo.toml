@@ -1,0 +1,15 @@
+[package]
+name = "siparse"
+version = "0.0.1"
+authors = ["Ryuma Taguchi <ryumatag@gmail.com>"]
+description = "A syntactic parser for SIP message heads"
+repository = "https://github.com/ryumatag/siparse"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+edition = "2021"
+include = [
+  "/src/**/*.rs",
+  "/README.md",
+  "LICENSE-APACHE",
+  "LICENSE-MIT",
+]
