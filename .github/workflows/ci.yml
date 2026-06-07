@@ -36,7 +36,7 @@ jobs:
             rust: stable
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -49,7 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -62,7 +62,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -70,3 +70,57 @@ jobs:
           components: clippy
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.65"
+      - name: Build
+        run: cargo build --verbose
+
+  no-std:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: thumbv7em-none-eabihf
+      - name: Build for a target without std
+        run: >-
+          cargo build --verbose --lib --no-default-features
+          --target thumbv7em-none-eabihf
+
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: miri
+      - name: Run tests under Miri
+        run: cargo miri test --verbose
+
+  docs:
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -Dwarnings
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Build docs
+        run: cargo doc --no-deps --verbose

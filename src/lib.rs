@@ -1,0 +1,179 @@
+/*!
+`siparse` is a syntactic parser for SIP message heads. It parses the
+request-line or status-line and the header rows that follow.
+
+It does not perform semantic decoding. Header names are not normalized, compact
+forms such as `v` for `Via` are not expanded, typed header values are not
+parsed, and folded values are returned raw. Message bodies, including
+`Content-Length` handling, are left to the caller.
+
+Every token is returned as a `&str` borrowed from the caller's input buffer,
+and header rows are written into storage that the caller provides. Parsing
+neither copies nor allocates.
+
+Delimiter scanning currently uses portable SWAR (SIMD Within A Register) code
+on every target. SIMD fast paths for x86_64 and aarch64 are planned.
+
+Here is a quick example that shows how to parse a typical SIP request:
+
+```
+use siparse::{Header, RequestHead, Status};
+
+let buf = b"INVITE sip:bob@example.com SIP/2.0\r\n\
+            Via: SIP/2.0/UDP pc33.example.com;branch=z9hG4bK776asdhds\r\n\
+            Content-Length: 0\r\n\
+            \r\n";
+
+let mut headers = [Header::EMPTY; 16];
+let Status::Complete((head, head_end)) = RequestHead::parse(buf, &mut headers)?
+else {
+    // Read more input and parse again from the beginning.
+    return Ok(());
+};
+
+assert_eq!(head.start_line.method, "INVITE");
+assert_eq!(head.start_line.uri, "sip:bob@example.com");
+assert_eq!(head.headers[0].name, "Via");
+assert_eq!(head.headers[1].value, "0");
+assert_eq!(head_end, buf.len());
+# Ok::<(), siparse::Error>(())
+```
+
+# Partial input
+
+[`Status::Partial`] is not an error. It means the buffer ends before the head
+does, and it carries no partial head. The parser keeps no state between calls,
+so the caller reads more input and parses the whole buffer again from the
+beginning, reusing the same header storage.
+
+Because every retry starts over, a head that arrives in many small reads costs
+time quadratic in its length. On stream transports, limit the head size. A
+framer can also skip most retries. After a `Partial`, it scans only the newly
+read bytes, plus the last three bytes of the previous read, for the empty line
+`\r\n\r\n`, and parses again only once that appears. A false match only costs
+one extra parse, so the scan does not need to follow the grammar exactly. For
+example, an [RFC 5626] keepalive `\r\n\r\n` before the start-line is harmless,
+because the parser skips leading `CRLF`s and reports `Partial` again.
+
+# Keeping parsed data
+
+A parsed [`MessageHead`] borrows the input buffer, so it cannot outlive that
+buffer or survive a reallocation of it, such as a growing [`BytesMut`]. Callers
+that need to keep tokens record where each one lies while the head is still
+alive, then let the head go. A token's start offset is
+`token.as_ptr() as usize - buf.as_ptr() as usize`, which works with any buffer
+type.
+
+With the [`bytes`] crate, the recorded ranges let the caller share the head
+without copying it:
+
+```
+use bytes::{Bytes, BytesMut};
+use siparse::{Header, RequestHead, Status};
+
+let mut buf = BytesMut::from(
+    &b"OPTIONS sip:carol@example.com SIP/2.0\r\n\
+       Call-ID: a84b4c76e66710@pc33.example.com\r\n\
+       \r\n"[..],
+);
+
+let mut headers = [Header::EMPTY; 16];
+let (value_ranges, head_end) = match RequestHead::parse(&buf, &mut headers)? {
+    Status::Complete((head, head_end)) => {
+        let base = buf.as_ptr() as usize;
+        let ranges: Vec<_> = head
+            .headers
+            .iter()
+            .map(|header| {
+                let start = header.value.as_ptr() as usize - base;
+                start..start + header.value.len()
+            })
+            .collect();
+        (ranges, head_end)
+    }
+    Status::Partial => return Ok(()),
+};
+
+// The parsed head no longer borrows `buf`, so it can be split.
+let head_bytes = buf.split_to(head_end).freeze();
+let values: Vec<Bytes> =
+    value_ranges.into_iter().map(|range| head_bytes.slice(range)).collect();
+
+assert_eq!(values[0], "a84b4c76e66710@pc33.example.com");
+# Ok::<(), siparse::Error>(())
+```
+
+`siparse` leaves this conversion to the caller so that it stays free of
+transport and buffer-type dependencies.
+
+[`bytes`]: https://docs.rs/bytes
+[`BytesMut`]: https://docs.rs/bytes/latest/bytes/struct.BytesMut.html
+[RFC 5626]: https://www.rfc-editor.org/rfc/rfc5626
+
+# UTF-8 policy
+
+Header values and reason phrases are validated against modern UTF-8
+([RFC 3629], the same model used by Rust's `str` type) at parse time. This is
+an intentional narrowing relative to [RFC 3261]'s historical RFC 2279-era UTF-8
+ABNF. Overlong encodings, surrogates, and 5- and 6-byte forms are rejected.
+Because the parser validates before it borrows, returning `&str` costs no extra
+validation pass.
+
+[RFC 3629]: https://www.rfc-editor.org/rfc/rfc3629
+[RFC 3261]: https://www.rfc-editor.org/rfc/rfc3261
+
+# Crate features
+
+* **std** (enabled by default) - Implements `std::error::Error` for [`Error`].
+  Without it, `siparse` is `no_std` and does not use `alloc`.
+*/
+
+#![no_std]
+#![allow(
+    // My preference.
+    clippy::use_self,
+    clippy::needless_lifetimes,
+)]
+#![deny(
+    unreachable_pub,
+    clippy::missing_safety_doc,
+    clippy::undocumented_unsafe_blocks,
+    rustdoc::broken_intra_doc_links
+)]
+#![warn(missing_docs, missing_debug_implementations)]
+
+#[cfg(any(test, feature = "std"))]
+extern crate std;
+
+#[macro_use]
+mod macros;
+
+mod error;
+mod iter;
+mod parser;
+mod simd;
+mod token;
+mod utf8;
+
+#[doc(inline)]
+pub use self::{
+    error::{Error, ErrorKind},
+    parser::{
+        Header, MessageHead, RequestHead, RequestLine, ResponseHead, Status,
+        StatusLine,
+    },
+};
+
+// For benchmarking by the `siparse-bench` crate. Not part of the public API.
+#[doc(hidden)]
+pub mod _private {
+    #[doc(hidden)]
+    pub use super::{
+        iter::Bytes,
+        parser::{
+            parse_header_name, parse_header_value, parse_method,
+            parse_reason_phrase, parse_request_uri, parse_status_code,
+            parse_version,
+        },
+    };
+}

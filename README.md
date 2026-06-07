@@ -4,11 +4,55 @@ siparse
 =======
 A syntactic parser for SIP message heads in Rust.
 
-**THIS CRATE IS STILL A WORK IN PROGRESS.**
+[![Build status](https://github.com/ryumatag/siparse/actions/workflows/ci.yml/badge.svg)](https://github.com/ryumatag/siparse/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/siparse.svg)](https://crates.io/crates/siparse)
+[![Docs.rs](https://img.shields.io/docsrs/siparse)](https://docs.rs/siparse)
 
 </div>
 
 <br>
+
+`siparse` parses SIP request-lines, status-lines, and header rows. It is a
+syntactic parser only and does not perform semantic decoding. Header names
+are not normalized, typed header values are not parsed, and message bodies
+are left to the caller.
+
+Every parsed token is a `&str` borrowed from the input buffer, so parsing
+neither copies nor allocates. It works without `std`.
+
+Scanning currently uses portable SWAR (SIMD Within A Register) code. SIMD
+fast paths for x86_64 and aarch64 are planned.
+
+### Example
+
+```rust
+use siparse::{Header, RequestHead, Status};
+
+let buf = b"INVITE sip:bob@example.com SIP/2.0\r\n\
+            Via: SIP/2.0/UDP pc33.example.com;branch=z9hG4bK776asdhds\r\n\
+            Content-Length: 0\r\n\
+            \r\n";
+
+let mut headers = [Header::EMPTY; 16];
+
+match RequestHead::parse(buf, &mut headers)? {
+    Status::Complete((head, head_end)) => {
+        assert_eq!(head.start_line.method, "INVITE");
+        assert_eq!(head.start_line.uri, "sip:bob@example.com");
+        assert_eq!(head.headers[0].name, "Via");
+        assert_eq!(head.headers[1].value, "0");
+        assert_eq!(head_end, buf.len());
+    }
+    Status::Partial => {
+        // Read more input and parse again from the beginning.
+    }
+}
+```
+
+### Acknowledgements
+
+The parser internals draw heavily on
+[`httparse`](https://docs.rs/httparse).
 
 ### License
 

@@ -1,0 +1,26 @@
+[package]
+publish = false
+name = "siparse-bench"
+version = "0.0.1"
+authors = ["Ryuma Taguchi <ryumatag@gmail.com>"]
+description = "Criterion benchmark suite for the siparse crate."
+license = "MIT OR Apache-2.0"
+edition = "2021"
+
+[workspace]
+
+[[bench]]
+name = "siparse-bench"
+harness = false
+path = "src/bench.rs"
+
+[dependencies]
+criterion = { version = "0.8.2", default-features = false }
+siparse = { path = ".." }
+rand = "0.10.3"
+
+[profile.release]
+debug = true
+
+[profile.bench]
+debug = true

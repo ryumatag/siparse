@@ -6,10 +6,30 @@ description = "A syntactic parser for SIP message heads"
 repository = "https://github.com/ryumatag/siparse"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
+keywords = ["sip", "parser", "rfc3261", "voip", "no_std"]
+categories = [
+  "network-programming",
+  "no-std",
+  "no-std::no-alloc",
+  "parser-implementations",
+]
 edition = "2021"
+rust-version = "1.65"
 include = [
   "/src/**/*.rs",
+  "/examples/**/*.rs",
   "/README.md",
   "LICENSE-APACHE",
   "LICENSE-MIT",
 ]
+
+[features]
+default = ["std"]
+std = []
+
+[[example]]
+name = "parse_request"
+path = "examples/parse_request.rs"
+
+[dev-dependencies]
+bytes = "1.12.1"
