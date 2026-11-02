@@ -44,6 +44,18 @@ jobs:
       - name: Test
         run: cargo test --verbose
 
+  test-bench:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: stable
+    - name: Run benchmark tests
+      run: cargo bench --manifest-path bench/Cargo.toml -- --test
+
   rustfmt:
     name: rustfmt
     runs-on: ubuntu-latest
