@@ -73,10 +73,10 @@ jobs:
       - name: Compare
         if: steps.base.outputs.ran == 'true'
         working-directory: bench
-        # `-t 5` alone prints nothing when no benchmark moved by 5% or
-        # more, so print the full table first.
+        # `-t 5` alone prints nothing useful when no benchmark moved by 5%
+        # or more, so print the full table first.
         run: |
           critcmp base head
           echo
           echo "Changes of 5% or more:"
-          critcmp -t 5 base head
+          critcmp -t 5 base head || true
