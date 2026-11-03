@@ -36,8 +36,8 @@ fn fixed_shape(c: &mut Criterion) {
     }
 }
 
-// Geometric size sweep over `header-name` length. Borrowed from the `httparse`
-// crate so we get the same shape of throughput curve to compare against.
+// Geometric size sweep over `header-name` length. This follows
+// `httparse` so the throughput curves can be compared.
 fn sweep(c: &mut Criterion) {
     const NAME: &str = "parse/header_name/sweep";
 

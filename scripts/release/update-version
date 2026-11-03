@@ -7,9 +7,8 @@ source "$(dirname -- "$0")/common.sh"
 version="$1"
 validate_version "$version"
 
-# I develop on both macOS and Linux, so I avoid sed -i because its syntax
-# differs between them. Only replace the [package] version so dependency
-# versions stay untouched.
+# I avoid sed -i because its syntax differs between macOS and Linux.
+# Only replace the [package] version so dependency versions stay untouched.
 manifest_tmp="$(mktemp Cargo.toml.XXXXXX)"
 trap 'rm -f -- "$manifest_tmp"' EXIT
 awk -v version="$version" '

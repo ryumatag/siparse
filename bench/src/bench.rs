@@ -51,9 +51,7 @@ criterion::criterion_main!(benches);
 /// It excludes terminators and sentinel bytes that only tell the parser
 /// where the production ends. Whole-head benchmarks count the entire head.
 ///
-/// All sub-modules go through this helper so we can tweak Criterion-side
-/// settings (id transformations, throughput configuration, sampling) in one
-/// place.
+/// This helper keeps Criterion settings in one place.
 ///
 /// Borrowing this style from the `jiff-bench` crate.
 fn benchmark(
@@ -63,8 +61,8 @@ fn benchmark(
     f: impl FnMut(&mut Bencher<'_>),
 ) {
     // Criterion exposes throughput on `BenchmarkGroup`, not on the bare
-    // `bench_function`. We work around that by splitting the slashed id
-    // into a group prefix and a function name. For an id like
+    // `bench_function`. I split the slashed id into a group prefix and a
+    // function name. For an id like
     // `parse/method/invite`, the group becomes `parse` and the function
     // becomes `method/invite`. Criterion concatenates the two back to
     // `parse/method/invite` for display.

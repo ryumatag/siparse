@@ -14,7 +14,7 @@ neither copies nor allocates.
 Delimiter scanning currently uses portable SWAR (SIMD Within A Register) code
 on every target. SIMD fast paths for x86_64 and aarch64 are planned.
 
-Here is a quick example that shows how to parse a typical SIP request:
+Parse a SIP request:
 
 ```
 use siparse::{HeaderBuf, RequestHead, Status};

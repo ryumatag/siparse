@@ -8,8 +8,8 @@ use crate::{
 };
 
 pub(super) fn parse(c: &mut Criterion) {
-    // `parse_status_code` parsing is shape-uniform (always 3 ASCII digits
-    // followed by a SP), so a single benchmark covers it.
+    // Every status code has three ASCII digits followed by SP, so one
+    // benchmark covers this production.
     const NAME: &str = "parse/status_code";
     const INPUT: &[u8] = b"200 ";
 

@@ -156,7 +156,7 @@ pub fn parse_reason_phrase<'buf>(
         simd::match_reason_phrase_ascii_vectored(bytes);
 
         // The SIMD pass above consumes every byte for which
-        // `is_reason_phrase_octet` returns true. The byte we peek next is
+        // `is_reason_phrase_octet` returns true. The next byte is
         // therefore guaranteed to be outside that set, so there is no arm here
         // for `is_reason_phrase_octet`.
         match peek!(bytes) {
@@ -255,8 +255,8 @@ fn parse_crlf(bytes: &mut Bytes<'_>, unexpected: Error) -> Result<()> {
         Some([b'\r', _]) => Err(Error::bare_cr()),
         Some([b'\n', _]) => Err(Error::bare_lf()),
         Some(_) => Err(unexpected),
-        // Fewer than two bytes remain. The input is partial unless the byte we
-        // do have already rules out `CRLF`.
+        // Fewer than two bytes remain. The input is partial unless the
+        // remaining byte already rules out `CRLF`.
         None => match bytes.peek() {
             None | Some(b'\r') => Ok(Status::Partial),
             Some(b'\n') => Err(Error::bare_lf()),

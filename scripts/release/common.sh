@@ -3,8 +3,8 @@
 # Based on https://github.com/BurntSushi/jiff/tree/master/scripts/release.
 # You'll need Bash, Cargo, jq, Git, and a configured Git signing key.
 #
-# I usually follow these steps when making a release. I start with a clean
-# working tree and use a separate branch for the version bump:
+# Start with a clean working tree and use a separate branch for the version
+# bump:
 #
 #   git switch main
 #   git pull --ff-only
@@ -12,8 +12,8 @@
 #   scripts/release/commit 0.2.1
 #   git push -u origin release/0.2.1
 #
-# I then open a PR and merge it into main. Once it's merged, I update my
-# local main and push the signed release tag:
+# Open a PR and merge it into main. Once it's merged, update local main and
+# push the signed release tag:
 #
 #   git switch main
 #   git pull --ff-only

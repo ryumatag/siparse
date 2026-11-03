@@ -80,7 +80,7 @@ impl<'a> Bytes<'a> {
     #[inline]
     pub(crate) fn peek_n<const N: usize>(&self) -> Option<[u8; N]> {
         // `self.remaining().get(..N)?.try_into().ok()` is equivalent, but
-        // benchmarks showed that it slows down the entire head parser...
+        // benchmarks showed that it slows down the entire head parser.
         if self.len() < N {
             return None;
         }
