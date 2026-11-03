@@ -763,6 +763,7 @@ mod tests {
         |head| {
             assert_eq!(head.start_line.version, Some("SIP/2.0"));
             assert_eq!(head.start_line.status_code, Some("200"));
+            assert_eq!(head.start_line.code(), Some(200));
             assert_eq!(head.start_line.reason_phrase, Some("OK"));
 
             assert_eq!(head.headers.len(), 2);
