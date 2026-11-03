@@ -165,6 +165,11 @@ backslash. Bare `CR` and bare `LF` are rejected. Incomplete line endings
 return [`Status::Partial`]. Non-ASCII bytes must form modern UTF-8 even after
 a backslash. No quoting mechanism bypasses this validation.
 
+Leading `SP`, `HTAB`, and folds are not part of a value, because RFC 3261's
+`HCOLON` makes them part of the separator. Trailing whitespace is kept. Some
+header grammars give it no meaning, while the generic `header-value` includes
+it, so trimming it is left to the consumer.
+
 [RFC 3261 section 25.1]: https://www.rfc-editor.org/rfc/rfc3261#section-25.1
 
 ### UTF-8
