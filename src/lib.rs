@@ -118,6 +118,39 @@ transport and buffer-type dependencies.
 [`BytesMut`]: https://docs.rs/bytes/latest/bytes/struct.BytesMut.html
 [RFC 5626]: https://www.rfc-editor.org/rfc/rfc5626
 
+# Header value policy
+
+Header values are checked as raw field values without selecting a grammar from
+the header name. The parser accepts `HTAB`, printable ASCII (`0x20..=0x7e`),
+modern UTF-8, and line folding. It also accepts ASCII controls other than `CR`
+and `LF`, and `DEL`, when immediately preceded by an odd-length run of
+backslashes. The bytes are returned verbatim, including backslashes and any
+escaped NUL or other controls.
+
+This accommodates [RFC 3261 section 25.1]'s `quoted-pair` in known headers'
+`quoted-string` and `comment` productions. Its generic `extension-header`
+`header-value` production does not permit those controls, even after a
+backslash. The parser deliberately accepts a broader envelope for every
+header name. Checking whether a quoted-pair occurs in a quoted string or
+comment allowed by that field's grammar is the consumer's responsibility.
+Quote balancing, comment nesting, and other field-specific syntax are also
+left to the consumer. Acceptance here does not establish that a header value
+matches its RFC grammar.
+
+The parser does not track quotation marks or parentheses. Their meaning
+depends on the field's grammar, and tracking them for every value would add
+work to ordinary ASCII parsing. Instead, only otherwise disallowed controls
+trigger a backward check of the immediately preceding backslash run. An even
+run has no unpaired backslash and does not permit a control.
+
+Backslashes never escape `CR` or `LF`. A `CRLF` followed by `SP` or `HTAB`
+is preserved as a fold, and any other `CRLF` ends the row, even after a
+backslash. Bare `CR` and bare `LF` are rejected. Incomplete line endings
+return [`Status::Partial`]. Non-ASCII bytes must form modern UTF-8 even after
+a backslash. No quoting mechanism bypasses this validation.
+
+[RFC 3261 section 25.1]: https://www.rfc-editor.org/rfc/rfc3261#section-25.1
+
 # UTF-8 policy
 
 Header values and reason phrases are validated against modern UTF-8
