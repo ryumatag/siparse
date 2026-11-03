@@ -53,7 +53,7 @@ pub enum ErrorKind {
     /// structure rules and cannot be escaped by a backslash.
     ///
     /// Header-specific quoted-string and comment syntax is not validated.
-    /// See the crate's [header value policy](crate#header-value-policy).
+    /// See the crate's [header value policy](crate#header-values).
     HeaderValue,
     /// A header name is not followed by `:`. This covers a row that ends right
     /// after the name and whitespace inside the name, as in

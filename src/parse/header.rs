@@ -29,7 +29,7 @@ pub struct Header<'buf> {
     /// The value is modern UTF-8 and may contain ASCII controls or `DEL`
     /// after an unpaired backslash. Header-specific quoted-string and
     /// comment syntax is left to the consumer. See the crate's
-    /// [header value policy](crate#header-value-policy).
+    /// [header value policy](crate#header-values).
     pub value: &'buf str,
 }
 
