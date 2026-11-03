@@ -20,11 +20,13 @@ pub struct Header<'buf> {
     /// The name is not case-normalized and compact forms such as `v` for `Via`
     /// are not expanded.
     pub name: &'buf str,
-    /// The raw header field value, without the optional `SP` / `HTAB`
-    /// following `:` and without the terminating `CRLF`.
+    /// The raw header field value, without the terminating `CRLF`.
     ///
-    /// A folded value keeps its interior `CRLF` and leading whitespace
-    /// verbatim. Unfolding is left to the consumer.
+    /// Leading `SP`, `HTAB`, and folds are not part of the value, because
+    /// RFC 3261's `HCOLON` makes them part of the separator. Trailing
+    /// whitespace is kept, since whether it carries meaning depends on the
+    /// header's grammar. A folded value keeps its interior `CRLF` and the
+    /// whitespace after it verbatim. Unfolding is left to the consumer.
     ///
     /// The value is modern UTF-8 and may contain ASCII controls or `DEL`
     /// after an unpaired backslash. Header-specific quoted-string and
@@ -235,7 +237,7 @@ pub fn parse_header_name<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
 #[allow(missing_docs)]
 #[inline]
 pub fn parse_header_value<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
-    let mark = bytes.mark_token();
+    let mut mark = bytes.mark_token();
 
     loop {
         simd::match_header_value_vectored(bytes);
@@ -248,7 +250,25 @@ pub fn parse_header_value<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
                 match peek!(bytes) {
                     b' ' | b'\t' => {
                         // SAFETY: `peek!` just returned a byte.
-                        unsafe { bytes.advance(1) }
+                        unsafe { bytes.advance(1) };
+
+                        // RFC 3261 defines `HCOLON = *( SP / HTAB ) ":" SWS`
+                        // with `SWS = [LWS]`. A fold before the first value
+                        // byte is therefore part of the separator, so the
+                        // value starts after it and its whitespace.
+                        // `parse_header` has already skipped `SP` / `HTAB`
+                        // after the colon, so such a fold ends exactly 3 bytes
+                        // past the mark.
+                        //
+                        // Checking here keeps leading folds off the common
+                        // path, because only a fold reaches this arm.
+                        if mark.len(bytes) == 3 {
+                            while matches!(bytes.peek(), Some(b' ' | b'\t')) {
+                                // SAFETY: `peek` just returned a byte.
+                                unsafe { bytes.advance(1) };
+                            }
+                            mark = bytes.mark_token();
+                        }
                     }
                     _ => {
                         // SAFETY: Every consumed byte is an ASCII

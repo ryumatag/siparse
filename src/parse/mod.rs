@@ -502,6 +502,72 @@ mod tests {
         }
     }
 
+    // RFC 3261, Section 25.1:
+    //
+    // > ```text
+    // > HCOLON  =  *( SP / HTAB ) ":" SWS
+    // > SWS     =  [LWS] ; sep whitespace
+    // > ```
+    //
+    // Leading LWS, including a fold, is part of the separator. Trailing LWS
+    // stays, because only the header's own grammar can say whether it matters.
+    #[test]
+    fn strips_leading_but_keeps_trailing_linear_whitespace() {
+        for (row, expected) in [
+            (&b"Subject:\r\n lunch"[..], "lunch"),
+            (b"Subject: \t\r\n \r\n\t lunch", "lunch"),
+            (b"Subject:\r\n lunch\r\n soon", "lunch\r\n soon"),
+            (b"Subject:\r\n \r\n\t", ""),
+            (b"Subject: lunch \t", "lunch \t"),
+            (b"Subject: lunch\r\n \t", "lunch\r\n \t"),
+        ] {
+            let mut buf = std::vec::Vec::from(
+                &b"OPTIONS sip:carol@example.com SIP/2.0\r\n"[..],
+            );
+            buf.extend_from_slice(row);
+            buf.extend_from_slice(b"\r\nMax-Forwards: 70\r\n\r\n");
+
+            let mut headers = HeaderBuf::<N_HEADERS>::new();
+            let mut head = RequestHead::new(&mut headers);
+            let head_end = head.parse(&buf).unwrap().unwrap();
+
+            assert_eq!(head_end, buf.len());
+            assert_eq!(head.headers[0].value, expected, "row={row:?}");
+            assert_eq!(head.headers[1].value, "70");
+        }
+    }
+
+    // The byte after the `CRLF` decides between a leading fold and an empty
+    // value, so the parser has to wait for it.
+    req! {
+        returns_partial_when_crlf_after_colon_is_last,
+        b"OPTIONS sip:carol@example.com SIP/2.0\r\n\
+          Subject:\r\n",
+        => Partial
+    }
+
+    req! {
+        returns_partial_when_leading_fold_is_last,
+        b"OPTIONS sip:carol@example.com SIP/2.0\r\n\
+          Subject:\r\n ",
+        => Partial
+    }
+
+    req! {
+        returns_partial_when_cr_after_colon_is_last,
+        b"OPTIONS sip:carol@example.com SIP/2.0\r\n\
+          Subject:\r",
+        => Partial
+    }
+
+    req! {
+        rejects_bare_cr_after_colon,
+        b"OPTIONS sip:carol@example.com SIP/2.0\r\n\
+          Subject:\r lunch\r\n\
+          \r\n",
+        => Err(BareCr)
+    }
+
     // RFC 3261, Section 7.3.1 says the following are valid and equivalent:
     //
     // > ```text
@@ -511,8 +577,8 @@ mod tests {
     // > Subject: lunch
     // > ```
     //
-    // The parser should therefore not include the pre-colon whitespace in
-    // the field-name token.
+    // The parser should therefore not include the pre-colon whitespace in the
+    // field-name token.
     req! {
         trims_optional_whitespace_before_colon_from_header_name,
         b"INVITE sip:bob@example.com SIP/2.0\r\n\

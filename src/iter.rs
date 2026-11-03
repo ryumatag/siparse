@@ -120,6 +120,12 @@ impl TokenMark {
         self.start == bytes.cursor
     }
 
+    /// Returns the number of bytes between this mark and the cursor.
+    #[inline]
+    pub(crate) fn len(&self, bytes: &Bytes) -> usize {
+        bytes.cursor as usize - self.start as usize
+    }
+
     /// Returns the bytes from this mark up to the cursor as a `&str`.
     ///
     /// # Safety
