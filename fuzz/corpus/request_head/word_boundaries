@@ -1,0 +1,11 @@
+INVITE sip:a%20b@host SIP/2.0
+X: aaa\📞
+X: aaaa\📞
+X: aaaaa\📞
+X: aaaaaaa\📞
+X: aaaaaaaa\📞
+X: aaaaaaaaa\📞
+X: aaaaaaaaaaaaaaa\📞
+X: aaaaaaaaaaaaaaaa\📞
+X: aaaaaaaaaaaaaaaaa\📞
+
