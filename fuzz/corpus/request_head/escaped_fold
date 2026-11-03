@@ -1,0 +1,4 @@
+INVITE sip:a%20b@host SIP/2.0
+X: backslash\
+ folded
+

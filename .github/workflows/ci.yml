@@ -56,6 +56,23 @@ jobs:
     - name: Run benchmark tests
       run: cargo bench --manifest-path bench/Cargo.toml -- --test
 
+  test-fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked --version 0.13.2
+      - name: Test seeds and every complete head prefix
+        run: cargo test --manifest-path fuzz/Cargo.toml --lib
+      - name: Build fuzz targets with AddressSanitizer
+        run: cargo fuzz build --sanitizer address
+
   rustfmt:
     name: rustfmt
     runs-on: ubuntu-latest
@@ -68,7 +85,9 @@ jobs:
           toolchain: stable
           components: rustfmt
       - name: Check formatting
-        run: cargo fmt -- --check
+        run: |
+          cargo fmt -- --check
+          cargo fmt --manifest-path fuzz/Cargo.toml -- --check
 
   clippy:
     runs-on: ubuntu-latest
@@ -81,7 +100,9 @@ jobs:
           toolchain: stable
           components: clippy
       - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
 
   msrv:
     runs-on: ubuntu-latest
