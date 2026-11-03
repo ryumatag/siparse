@@ -1,6 +1,7 @@
 use criterion::{Bencher, Criterion, Throughput};
 use siparse::_private as private;
 
+mod any;
 mod corpus;
 mod header_name;
 mod header_value;
@@ -28,6 +29,7 @@ criterion::criterion_group! {
         // `corpus` ones in particular.
         request::parse,
         response::parse,
+        any::parse,
         // Private API. These call one production directly, so the compiler
         // inlines it into the benchmark loop instead of into `parse_head`,
         // and the generated code differs from what the public API runs.

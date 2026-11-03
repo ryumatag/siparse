@@ -15,7 +15,7 @@ pub use self::{
     keepalive::{parse_ping, parse_pong},
     start_line::{
         parse_method, parse_reason_phrase, parse_request_uri,
-        parse_status_code, parse_version, RequestLine, StatusLine,
+        parse_status_code, parse_version, RequestLine, StartLine, StatusLine,
     },
 };
 
@@ -44,7 +44,8 @@ pub enum Status<T> {
 
 /// A SIP message head that the parser fills in place.
 ///
-/// * The start-line is a small struct of `Option<&'buf str>` fields.
+/// * The start-line is a small struct of `Option<&'buf str>` fields, or for
+///   [`AnyHead`] an `Option` of either struct.
 /// * The header rows live in caller-provided [`Headers`] storage that is
 ///   borrowed for `'hdr`.
 /// * Every parsed string borrows from the input buffer that lives for
@@ -84,6 +85,35 @@ pub type RequestHead<'hdr, 'buf> = MessageHead<'hdr, 'buf, RequestLine<'buf>>;
 /// This is a syntactic view over the status-line and header rows. It does
 /// not perform semantic decoding.
 pub type ResponseHead<'hdr, 'buf> = MessageHead<'hdr, 'buf, StatusLine<'buf>>;
+
+/// A SIP request or response head that the parser fills in place.
+///
+/// Use this when the kind of head is not known before parsing, for example on
+/// a socket that receives both requests and responses. The start-line is
+/// `None` until the parser has seen enough bytes to tell the two apart, and
+/// is always `Some` after [`Status::Complete`].
+///
+/// # Example
+///
+/// ```
+/// use siparse::{AnyHead, HeaderBuf, StartLine, Status};
+///
+/// let buf = b"SIP/2.0 180 Ringing\r\n\
+///             Content-Length: 0\r\n\
+///             \r\n";
+///
+/// let mut headers = HeaderBuf::<16>::new();
+/// let mut head = AnyHead::new(&mut headers);
+/// assert_eq!(head.parse(buf)?, Status::Complete(buf.len()));
+///
+/// let Some(StartLine::Status(line)) = head.start_line else {
+///     panic!("expected a status-line");
+/// };
+/// assert_eq!(line.code(), Some(180));
+/// # Ok::<(), siparse::Error>(())
+/// ```
+pub type AnyHead<'hdr, 'buf> =
+    MessageHead<'hdr, 'buf, Option<StartLine<'buf>>>;
 
 impl<'hdr, 'buf, S: Default> MessageHead<'hdr, 'buf, S> {
     /// Creates an empty head that stores header rows in `headers`.
@@ -149,6 +179,26 @@ impl<'hdr, 'buf> ResponseHead<'hdr, 'buf> {
     /// apart.
     pub fn parse(&mut self, buf: &'buf [u8]) -> Result<usize> {
         parse_head(self, buf, start_line::parse_status_line)
+    }
+}
+
+impl<'hdr, 'buf> AnyHead<'hdr, 'buf> {
+    /// Parses a SIP request or response head from the beginning of `buf` into
+    /// this head.
+    ///
+    /// This behaves like [`RequestHead::parse`] or [`ResponseHead::parse`],
+    /// whichever matches the start-line. A start-line that begins with `SIP/`,
+    /// compared case-insensitively, is parsed as a status-line. Anything else
+    /// is parsed as a request-line, because a method token cannot contain
+    /// `/`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as the parser for the chosen kind of head. For
+    /// example, `SIP/3.0 200 OK` is a [`Version`](crate::ErrorKind::Version)
+    /// error, not a [`Method`](crate::ErrorKind::Method) error.
+    pub fn parse(&mut self, buf: &'buf [u8]) -> Result<usize> {
+        parse_head(self, buf, start_line::parse_start_line)
     }
 }
 
@@ -307,6 +357,12 @@ mod tests {
     macro_rules! res {
         ($($input:tt)*) => {
             head_test! { ResponseHead { $($input)* } }
+        };
+    }
+
+    macro_rules! any {
+        ($($input:tt)*) => {
+            head_test! { AnyHead { $($input)* } }
         };
     }
 
@@ -1306,5 +1362,116 @@ mod tests {
 
         assert_eq!(status, Ok(Status::Complete(buf.len())));
         assert_eq!(head.headers.capacity(), 0);
+    }
+
+    any! {
+        any_head_parses_request,
+        b"\r\nINVITE sip:bob@example.com SIP/2.0\r\n\
+          Content-Length: 0\r\n\
+          \r\n",
+        |head| {
+            let Some(StartLine::Request(line)) = head.start_line else {
+                panic!("expected a request-line, got {:?}", head.start_line);
+            };
+            assert_eq!(line.method, Some("INVITE"));
+            assert_eq!(line.uri, Some("sip:bob@example.com"));
+            assert_eq!(head.headers[0].value, "0");
+        }
+    }
+
+    any! {
+        any_head_parses_response,
+        b"\r\nSIP/2.0 200 OK\r\n\
+          Content-Length: 0\r\n\
+          \r\n",
+        |head| {
+            let Some(StartLine::Status(line)) = head.start_line else {
+                panic!("expected a status-line, got {:?}", head.start_line);
+            };
+            assert_eq!(line.status_code, Some("200"));
+            assert_eq!(line.reason_phrase, Some("OK"));
+            assert_eq!(head.headers[0].value, "0");
+        }
+    }
+
+    // The version is case-insensitive, so the prefix check must be too.
+    any! {
+        any_head_parses_lowercase_status_line,
+        b"sip/2.0 200 OK\r\n\r\n",
+        |head| {
+            assert!(matches!(head.start_line, Some(StartLine::Status(_))));
+        }
+    }
+
+    // `SIP` is a valid method token. Only a `/` in fourth place makes it a
+    // version.
+    any! {
+        any_head_parses_method_named_sip,
+        b"SIP sip:bob@example.com SIP/2.0\r\n\r\n",
+        |head| {
+            let Some(StartLine::Request(line)) = head.start_line else {
+                panic!("expected a request-line, got {:?}", head.start_line);
+            };
+            assert_eq!(line.method, Some("SIP"));
+        }
+    }
+
+    any! {
+        any_head_reports_status_line_errors,
+        b"SIP/3.0 200 OK\r\n\r\n",
+        => Err(Version)
+    }
+
+    any! {
+        any_head_reports_request_line_errors,
+        b"INV@TE sip:bob@example.com SIP/2.0\r\n\r\n",
+        => Err(Method)
+    }
+
+    #[test]
+    fn any_head_waits_until_prefix_decides_kind() {
+        for buf in [&b""[..], b"\r\n", b"S", b"si", b"SIP", b"\r\nsIp"] {
+            let mut headers = HeaderBuf::<N_HEADERS>::new();
+            let mut head = AnyHead::new(&mut headers);
+
+            assert_eq!(head.parse(buf), Ok(Status::Partial), "buf={buf:?}");
+            assert_eq!(head.start_line, None, "buf={buf:?}");
+        }
+    }
+
+    #[test]
+    fn any_head_keeps_partial_start_line_of_decided_kind() {
+        let mut headers = HeaderBuf::<N_HEADERS>::new();
+        let mut head = AnyHead::new(&mut headers);
+
+        assert_eq!(head.parse(b"SIP/"), Ok(Status::Partial));
+        assert_eq!(
+            head.start_line,
+            Some(StartLine::Status(StatusLine::default()))
+        );
+
+        assert_eq!(head.parse(b"SIPS"), Ok(Status::Partial));
+        assert_eq!(
+            head.start_line,
+            Some(StartLine::Request(RequestLine::default()))
+        );
+
+        assert_eq!(head.parse(b"SIP/2.0 486 "), Ok(Status::Partial));
+        let Some(StartLine::Status(line)) = head.start_line else {
+            panic!("expected a status-line, got {:?}", head.start_line);
+        };
+        assert_eq!(line.code(), Some(486));
+        assert_eq!(line.reason_phrase, None);
+    }
+
+    #[test]
+    fn any_head_resets_start_line_before_each_parse() {
+        let mut headers = HeaderBuf::<N_HEADERS>::new();
+        let mut head = AnyHead::new(&mut headers);
+
+        assert!(head.parse(INVITE).is_ok());
+        assert_eq!(head.parse(b"SI"), Ok(Status::Partial));
+        assert_eq!(head.start_line, None);
+        assert!(head.headers.is_empty());
     }
 }
