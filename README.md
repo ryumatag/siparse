@@ -26,25 +26,27 @@ fast paths for x86_64 and aarch64 are planned.
 ### Example
 
 ```rust
-use siparse::{Header, RequestHead, Status};
+use siparse::{HeaderBuf, RequestHead, Status};
 
 let buf = b"INVITE sip:bob@example.com SIP/2.0\r\n\
             Via: SIP/2.0/UDP pc33.example.com;branch=z9hG4bK776asdhds\r\n\
             Content-Length: 0\r\n\
             \r\n";
 
-let mut headers = [Header::EMPTY; 16];
+let mut headers = HeaderBuf::<16>::new();
+let mut head = RequestHead::new(&mut headers);
 
-match RequestHead::parse(buf, &mut headers)? {
-    Status::Complete((head, head_end)) => {
-        assert_eq!(head.start_line.method, "INVITE");
-        assert_eq!(head.start_line.uri, "sip:bob@example.com");
+match head.parse(buf)? {
+    Status::Complete(head_end) => {
+        assert_eq!(head.start_line.method, Some("INVITE"));
+        assert_eq!(head.start_line.uri, Some("sip:bob@example.com"));
         assert_eq!(head.headers[0].name, "Via");
         assert_eq!(head.headers[1].value, "0");
         assert_eq!(head_end, buf.len());
     }
     Status::Partial => {
-        // Read more input and parse again from the beginning.
+        // `head` holds what was parsed so far. Read more input and parse
+        // again from the beginning.
     }
 }
 ```

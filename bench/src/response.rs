@@ -1,7 +1,7 @@
 use std::hint::black_box as bb;
 
 use criterion::Criterion;
-use siparse::{Header, ResponseHead, Status};
+use siparse::{HeaderBuf, ResponseHead, Status};
 
 use crate::benchmark;
 
@@ -39,14 +39,13 @@ fn fixed_shape(c: &mut Criterion) {
 
     for (variant, input, header_count) in cases {
         let expected_end = input.len();
-        // Reused storage. Each parse only borrows it for the duration of the
-        // call.
-        let mut storage = vec![Header::EMPTY; 32];
+        // Reused storage. Every parse resets the head first.
+        let mut headers = HeaderBuf::<32>::new();
+        let mut head = ResponseHead::new(&mut headers);
         benchmark(c, format!("{NAME}/{variant}"), input.len() as u64, |b| {
             b.iter(|| {
-                let status =
-                    ResponseHead::parse(bb(input), &mut storage).unwrap();
-                let Status::Complete((head, end)) = bb(status) else {
+                let status = head.parse(bb(input)).unwrap();
+                let Status::Complete(end) = bb(status) else {
                     panic!("expected Complete, got Partial");
                 };
                 assert_eq!(end, expected_end);
@@ -62,13 +61,13 @@ fn corpus(c: &mut Criterion) {
     let messages = crate::corpus::responses();
     let total_bytes = messages.iter().map(|m| m.len() as u64).sum();
 
-    let mut storage = vec![Header::EMPTY; 32];
+    let mut headers = HeaderBuf::<32>::new();
+    let mut head = ResponseHead::new(&mut headers);
     benchmark(c, "parse/response_head/corpus", total_bytes, |b| {
         b.iter(|| {
             for msg in &messages {
-                let status =
-                    ResponseHead::parse(bb(msg), &mut storage).unwrap();
-                let Status::Complete((_, end)) = bb(status) else {
+                let status = head.parse(bb(msg)).unwrap();
+                let Status::Complete(end) = bb(status) else {
                     panic!("expected Complete, got Partial");
                 };
                 assert_eq!(end, msg.len());
