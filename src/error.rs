@@ -20,7 +20,7 @@ pub struct Error {
 /// The category of a syntactic SIP parse error.
 ///
 /// Most variants name the grammar element that rejected the input.
-/// [`BareCr`](ErrorKing::BareCr), [`BareLf`](ErrorKind::BareLf), and
+/// [`BareCr`](ErrorKind::BareCr), [`BareLf`](ErrorKind::BareLf), and
 /// [`MissingColon`](ErrorKind::MissingColon) instead name a broken line
 /// structure, wherever it occurs. A problem with a line ending is therefore
 /// reported the same way whether the line is the start-line or a header row.
