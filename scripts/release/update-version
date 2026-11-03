@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=common.sh
+source "$(dirname -- "$0")/common.sh"
+[[ $# == 1 ]] || die "Usage: $(basename "$0") <version>"
+version="$1"
+validate_version "$version"
+
+# I develop on both macOS and Linux, so I avoid sed -i because its syntax
+# differs between them. Only replace the [package] version so dependency
+# versions stay untouched.
+manifest_tmp="$(mktemp Cargo.toml.XXXXXX)"
+trap 'rm -f -- "$manifest_tmp"' EXIT
+awk -v version="$version" '
+  /^\[/ { package = ($0 == "[package]") }
+  package && /^version = "/ {
+    $0 = "version = \"" version "\""
+    count++
+  }
+  { print }
+  END { if (count != 1) exit 1 }
+' Cargo.toml > "$manifest_tmp"
+cat "$manifest_tmp" > Cargo.toml
+
+# fuzz has its own workspace and a checked-in lockfile. Let Cargo update the
+# siparse entry without refreshing unrelated dependencies.
+cargo metadata --format-version 1 \
+  --manifest-path fuzz/Cargo.toml > /dev/null
+printf 'Updated siparse to %s\n' "$version"
