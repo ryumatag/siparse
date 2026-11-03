@@ -42,6 +42,45 @@ pub struct StatusLine<'buf> {
     pub reason_phrase: Option<&'buf str>,
 }
 
+impl StatusLine<'_> {
+    /// Returns the status code as a number.
+    ///
+    /// SIP transaction handling branches on the code class all the time,
+    /// for example provisional `1xx` versus final responses, so this saves
+    /// every caller from converting the string itself.
+    ///
+    /// Returns `None` if `status_code` is `None`. It also returns `None` if
+    /// `status_code` is not exactly three ASCII digits. The parser never
+    /// stores such a value, but the field is public and can be set by hand.
+    ///
+    /// The value is not range-checked. RFC 3261 only defines classes `1xx`
+    /// through `6xx`, but the parser accepts any three digits.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use siparse::StatusLine;
+    ///
+    /// let line = StatusLine {
+    ///     version: Some("SIP/2.0"),
+    ///     status_code: Some("180"),
+    ///     reason_phrase: Some("Ringing"),
+    /// };
+    /// assert_eq!(line.code(), Some(180));
+    /// ```
+    #[inline]
+    pub fn code(&self) -> Option<u16> {
+        match *self.status_code?.as_bytes() {
+            [a @ b'0'..=b'9', b @ b'0'..=b'9', c @ b'0'..=b'9'] => Some(
+                u16::from(a - b'0') * 100
+                    + u16::from(b - b'0') * 10
+                    + u16::from(c - b'0'),
+            ),
+            _ => None,
+        }
+    }
+}
+
 #[inline]
 pub(super) fn parse_request_line<'buf>(
     bytes: &mut Bytes<'buf>,
@@ -262,5 +301,33 @@ fn parse_crlf(bytes: &mut Bytes<'_>, unexpected: Error) -> Result<()> {
             Some(b'\n') => Err(Error::bare_lf()),
             Some(_) => Err(unexpected),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::format;
+
+    fn line_with_code(status_code: Option<&str>) -> StatusLine<'_> {
+        StatusLine { status_code, ..StatusLine::default() }
+    }
+
+    #[test]
+    fn code_converts_every_three_digit_code() {
+        for n in 0..=999u16 {
+            let digits = format!("{n:03}");
+            assert_eq!(line_with_code(Some(&digits)).code(), Some(n));
+        }
+    }
+
+    // The parser never stores these, but `status_code` is a public field.
+    #[test]
+    fn code_returns_none_for_values_the_parser_never_stores() {
+        for status_code in
+            [None, Some(""), Some("20"), Some("2000"), Some("+20")]
+        {
+            assert_eq!(line_with_code(status_code).code(), None);
+        }
     }
 }
