@@ -81,6 +81,74 @@ impl StatusLine<'_> {
     }
 }
 
+/// A request-line or status-line, for heads whose kind is not known in
+/// advance.
+///
+/// Stream and datagram transports deliver requests and responses on the same
+/// connection or socket, so a SIP element often has to parse a head before it
+/// knows which kind it is. [`AnyHead`](crate::AnyHead) decides from the first
+/// bytes of the start-line and stores the result here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartLine<'buf> {
+    /// A request-line, such as `INVITE sip:bob@example.com SIP/2.0`.
+    Request(RequestLine<'buf>),
+    /// A status-line, such as `SIP/2.0 200 OK`.
+    Status(StatusLine<'buf>),
+}
+
+/// Parses a request-line or status-line, deciding which from its first bytes.
+///
+/// A status-line starts with `SIP/`, compared case-insensitively like the
+/// version. A request-line cannot, because a method token never contains `/`.
+/// So the first four bytes decide, and `line` stays `None` until they arrive.
+/// A method named `SIP` is still a request, since the fourth byte is then
+/// `SP`.
+///
+/// After that, `line` holds the variant with whatever fields its parser filled
+/// in, even on `Partial` or an error.
+#[inline]
+pub(super) fn parse_start_line<'buf>(
+    bytes: &mut Bytes<'buf>,
+    line: &mut Option<StartLine<'buf>>,
+) -> Result<()> {
+    const STATUS_LINE_PREFIX: &[u8; 4] = b"SIP/";
+
+    let is_status_line = match bytes.peek_n::<4>() {
+        Some(prefix) => prefix.eq_ignore_ascii_case(STATUS_LINE_PREFIX),
+        None => {
+            let remaining = bytes.remaining();
+            // `remaining` is shorter than the prefix here.
+            if remaining
+                .eq_ignore_ascii_case(&STATUS_LINE_PREFIX[..remaining.len()])
+            {
+                return Ok(Status::Partial);
+            }
+            false
+        }
+    };
+
+    // Store the variant first and let its parser fill it in place, so the
+    // fields parsed before `Partial` or an error stay readable. The other
+    // arm is unreachable because `insert` returns the variant it just stored.
+    // Parsing into a local and moving it into `line` afterwards was a few
+    // percent slower on the `any_head` corpus benchmark.
+    if is_status_line {
+        match line.insert(StartLine::Status(StatusLine::default())) {
+            StartLine::Status(status_line) => {
+                parse_status_line(bytes, status_line)
+            }
+            StartLine::Request(_) => unreachable!(),
+        }
+    } else {
+        match line.insert(StartLine::Request(RequestLine::default())) {
+            StartLine::Request(request_line) => {
+                parse_request_line(bytes, request_line)
+            }
+            StartLine::Status(_) => unreachable!(),
+        }
+    }
+}
+
 #[inline]
 pub(super) fn parse_request_line<'buf>(
     bytes: &mut Bytes<'buf>,

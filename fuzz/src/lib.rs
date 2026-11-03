@@ -18,7 +18,9 @@ including errors. It compares parsing results across header buffer capacities,
 including zero, exact-fit, and insufficient capacities, using a 16-slot parse
 as the reference. Inputs exceeding 16 rows still exercise overflow, but
 successful complete-head properties require at most 16 rows. Each parse reuses
-a head first populated with a valid row to exercise reset.
+a head first populated with a valid row to exercise reset. Both targets also
+check that `AnyHead` returns exactly what the parser its start-line selects
+returns.
 
 Only a head that actually returns `Complete(end)` supplies the prefix oracle.
 Each fuzz iteration checks the beginning, the last position before end, and one
@@ -34,7 +36,8 @@ cargo test --manifest-path fuzz/Cargo.toml --lib
 use std::ops::Range;
 
 use siparse::{
-    Error, ErrorKind, HeaderBuf, RequestHead, ResponseHead, Status,
+    AnyHead, Error, ErrorKind, HeaderBuf, RequestHead, ResponseHead,
+    StartLine, Status,
 };
 
 type ParseResult = Result<Status<usize>, Error>;
@@ -140,6 +143,8 @@ macro_rules! harness {
         }
 
         pub fn $run(input: &[u8]) {
+            check_any_head(input);
+
             let reference = $parse::<16>(input);
             check_capacity(&reference, &$parse::<0>(input), 0);
             // Const capacities keep the harness on the public HeaderBuf API.
@@ -162,6 +167,59 @@ macro_rules! harness {
             }
         }
     };
+}
+
+// `AnyHead` must behave exactly like the parser its start-line selects. The
+// oracle decides the kind independently of the library, from the first four
+// bytes after any leading `CRLF`s.
+fn check_any_head(input: &[u8]) {
+    let mut start = input;
+    while let Some(rest) = start.strip_prefix(b"\r\n") {
+        start = rest;
+    }
+    let is_status_line =
+        start.get(..4).is_some_and(|p| p.eq_ignore_ascii_case(b"SIP/"));
+    let reference = if is_status_line {
+        parse_response::<16>(input)
+    } else {
+        parse_request::<16>(input)
+    };
+
+    let mut storage = HeaderBuf::<16>::new();
+    let mut head = AnyHead::new(&mut storage);
+    // Prime with the other kind so a stale variant would show up.
+    let _ = head.parse(if is_status_line {
+        b"OPTIONS sip:a@b SIP/2.0\r\nX: prime\r\n\r\n".as_slice()
+    } else {
+        b"SIP/2.0 200 OK\r\nX: prime\r\n\r\n".as_slice()
+    });
+    let result = head.parse(input);
+
+    let range = |token: Option<&str>| token.map(|s| borrowed_range(input, s));
+    let fields = match head.start_line {
+        None => [None, None, None],
+        Some(StartLine::Request(line)) => {
+            assert!(!is_status_line);
+            [range(line.method), range(line.uri), range(line.version)]
+        }
+        Some(StartLine::Status(line)) => {
+            assert!(is_status_line);
+            [
+                range(line.version),
+                range(line.status_code),
+                range(line.reason_phrase),
+            ]
+        }
+    };
+    let rows: Vec<_> = head
+        .headers
+        .iter()
+        .map(|row| {
+            (borrowed_range(input, row.name), borrowed_range(input, row.value))
+        })
+        .collect();
+
+    assert_eq!(Observation { result, fields, rows }, reference);
 }
 
 harness!(

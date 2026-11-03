@@ -41,6 +41,10 @@ assert_eq!(head_end, buf.len());
 # Ok::<(), siparse::Error>(())
 ```
 
+[`ResponseHead`] parses a response the same way. When a head may be either,
+as on a socket that carries both, parse it with [`AnyHead`] and match on its
+[`StartLine`].
+
 # Partial input
 
 [`Status::Partial`] is not an error. It means the buffer ends before the head
@@ -221,8 +225,9 @@ mod utf8;
 pub use self::{
     error::{Error, ErrorKind},
     parse::{
-        parse_ping, parse_pong, Header, HeaderBuf, Headers, MessageHead,
-        RequestHead, RequestLine, ResponseHead, Status, StatusLine,
+        parse_ping, parse_pong, AnyHead, Header, HeaderBuf, Headers,
+        MessageHead, RequestHead, RequestLine, ResponseHead, StartLine,
+        Status, StatusLine,
     },
 };
 
