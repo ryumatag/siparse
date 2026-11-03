@@ -20,27 +20,25 @@ pub struct Error {
 /// The category of a syntactic SIP parse error.
 ///
 /// Most variants name the grammar element that rejected the input.
-/// [`BareCr`](Self::BareCr), [`BareLf`](Self::BareLf), and
-/// [`MissingColon`](Self::MissingColon) instead name a broken line structure,
-/// wherever it occurs. A problem with a line ending is therefore reported the
-/// same way whether the line is the start-line or a header row.
+/// [`BareCr`](ErrorKing::BareCr), [`BareLf`](ErrorKind::BareLf), and
+/// [`MissingColon`](ErrorKind::MissingColon) instead name a broken line
+/// structure, wherever it occurs. A problem with a line ending is therefore
+/// reported the same way whether the line is the start-line or a header row.
 ///
 /// A line that ends before the start-line has all of its elements, or before
 /// a header name is followed by `:`, is reported as the element that was cut
 /// short (or as `MissingColon`), not as a bare `CR` or `LF`. For example,
-/// `SIP/2.0 200\n` is a [`StatusCode`](Self::StatusCode) error, while
+/// `SIP/2.0 200\n` is a [`StatusCode`](ErrorKind::StatusCode) error, while
 /// `SIP/2.0 200 OK\n` is a `BareLf` error.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorKind {
-    /// The `SIP-Version` token is not `SIP/2.0`, compared
-    /// case-insensitively.
+    /// The `SIP-Version` token is not `SIP/2.0`, compared case-insensitively.
     Version,
     /// The request method is empty or contains a byte outside the RFC 3261
     /// `token` set.
     Method,
-    /// The request URI is empty or contains a byte outside the URI token
-    /// set.
+    /// The request URI is empty or contains a byte outside the URI token set.
     RequestUri,
     /// The status code is not exactly three ASCII digits.
     StatusCode,
@@ -52,8 +50,8 @@ pub enum ErrorKind {
     HeaderName,
     /// The header value contains a disallowed byte or invalid UTF-8.
     HeaderValue,
-    /// A header name is not followed by `:`. This covers a row that ends
-    /// right after the name and whitespace inside the name, as in
+    /// A header name is not followed by `:`. This covers a row that ends right
+    /// after the name and whitespace inside the name, as in
     /// `Call ID: a84b4c76e66710`.
     MissingColon,
     /// A `CR` is not followed by `LF`.

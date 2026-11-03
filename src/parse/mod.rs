@@ -5,12 +5,12 @@ SIP head parser.
 mod header;
 mod start_line;
 
-use core::mem::MaybeUninit;
-
 use crate::{error::Error, iter::Bytes};
 
 pub use self::{
-    header::{parse_header_name, parse_header_value, Header},
+    header::{
+        parse_header_name, parse_header_value, Header, HeaderBuf, Headers,
+    },
     start_line::{
         parse_method, parse_reason_phrase, parse_request_uri,
         parse_status_code, parse_version, RequestLine, StatusLine,
@@ -25,24 +25,13 @@ pub use self::{
 /// * `Status::Complete(T)` if a full SIP head has been parsed
 type Result<T> = core::result::Result<Status<T>, Error>;
 
-/// A parsed SIP request head.
-///
-/// This is a syntactic view over the request-line and header rows. It does
-/// not perform semantic decoding.
-pub type RequestHead<'hdr, 'buf> = MessageHead<'hdr, 'buf, RequestLine<'buf>>;
-
-/// A parsed SIP response head.
-///
-/// This is a syntactic view over the status-line and header rows. It does
-/// not perform semantic decoding.
-pub type ResponseHead<'hdr, 'buf> = MessageHead<'hdr, 'buf, StatusLine<'buf>>;
-
 /// Whether the input contained a complete SIP head.
 ///
 /// A parser returns `Complete(T)` when a full SIP head has been parsed
 /// successfully and `Partial` when the input ends before the head does.
-/// Parsing is not resumable. After `Partial`, the caller parses again from
-/// the beginning once more input has arrived.
+/// Parsing is not resumable. After `Partial`, the head holds what was parsed
+/// so far, and the caller parses again from the beginning once more input has
+/// arrived.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Status<T> {
     /// Parsing completed successfully and produced `T`.
@@ -51,172 +40,113 @@ pub enum Status<T> {
     Partial,
 }
 
-/// A parsed SIP message head.
+/// A SIP message head that the parser fills in place.
 ///
-/// `MessageHead` is intentionally lightweight:
-///
-/// * The start-line is stored as a small struct of `&'buf str` fields.
-/// * The header rows live in caller-provided storage that is borrowed for
-///   `'hdr`.
+/// * The start-line is a small struct of `Option<&'buf str>` fields.
+/// * The header rows live in caller-provided [`Headers`] storage that is
+///   borrowed for `'hdr`.
 /// * Every parsed string borrows from the input buffer that lives for
 ///   `'buf`. Nothing is copied or allocated.
 ///
-/// The parser validates every string it returns before borrowing it. ASCII
-/// productions (method, request URI, version, status code, header name) are
-/// checked against their RFC 3261 token sets. Reason phrases and header
-/// values are checked against modern UTF-8 (RFC 3629). Returning `&str`
-/// therefore costs no extra validation pass.
+/// The parser validates every string before it stores it. ASCII productions
+/// (method, request URI, version, status code, header name) are checked
+/// against their RFC 3261 token sets. Reason phrases and header values are
+/// checked against modern UTF-8 (RFC 3629). Storing `&str` therefore costs
+/// no extra validation pass.
 ///
-/// A `MessageHead` is only produced for a complete head. Parsing is not
-/// resumable, so on `Status::Partial` the caller parses again from the
-/// beginning once more input has arrived.
+/// Fields are filled in wire order. After `Status::Partial` or an error,
+/// the start-line fields and header rows parsed before the parser stopped
+/// remain readable.
 ///
 /// `MessageHead` is a **syntactic parser output**. It does not:
 ///
 /// * Normalize header names.
 /// * Construct typed SIP header values.
 /// * Validate higher-level SIP semantics.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct MessageHead<'hdr, 'buf, S> {
-    /// Parsed request-line or status-line.
+    /// Parsed request-line or status-line fields.
     pub start_line: S,
-
     /// Parsed header rows, in original wire order.
-    pub headers: &'hdr [Header<'buf>],
+    pub headers: &'hdr mut Headers<'buf>,
 }
 
-impl<'hdr, 'buf> MessageHead<'hdr, 'buf, RequestLine<'buf>> {
-    /// Parses a SIP request head from the beginning of `buf`.
-    ///
-    /// Header rows are written into `headers` in wire order. On
-    /// `Status::Complete`, this returns the parsed head together with
-    /// `head_end`, the offset in `buf` just past the empty line that
-    /// terminates the head. The message body, if any, starts there.
-    ///
-    /// On `Status::Partial` or an error, slots in `headers` may have been
-    /// overwritten with rows parsed before the parser stopped.
-    ///
-    /// `Status::Partial` means `buf` ends before the head does. The parser
-    /// keeps no state between calls, so each retry with a longer buffer
-    /// parses it again from the start. In streaming code, limit the head
-    /// size and the number or duration of retries. Otherwise a head that
-    /// arrives in many small reads costs time quadratic in its length.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the head is syntactically invalid or has more
-    /// header rows than `headers` can hold. [`Error::kind`] tells the two
-    /// apart.
-    #[inline]
-    pub fn parse(
-        buf: &'buf [u8],
-        headers: &'hdr mut [Header<'buf>],
-    ) -> Result<(RequestHead<'hdr, 'buf>, usize)> {
-        parse_head(buf, as_uninit(headers), start_line::parse_request_line)
-    }
-
-    /// Parses a SIP request head into uninitialized header storage.
-    ///
-    /// This behaves like [`RequestHead::parse`] but lets callers skip
-    /// initializing `headers` up front, which matters for large header
-    /// storage.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the head is syntactically invalid or has more
-    /// header rows than `headers` can hold. [`Error::kind`] tells the two
-    /// apart.
-    #[inline]
-    pub fn parse_uninit(
-        buf: &'buf [u8],
-        headers: &'hdr mut [MaybeUninit<Header<'buf>>],
-    ) -> Result<(RequestHead<'hdr, 'buf>, usize)> {
-        parse_head(buf, headers, start_line::parse_request_line)
-    }
-}
-
-impl<'hdr, 'buf> MessageHead<'hdr, 'buf, StatusLine<'buf>> {
-    /// Parses a SIP response head from the beginning of `buf`.
-    ///
-    /// Header rows are written into `headers` in wire order. On
-    /// `Status::Complete`, this returns the parsed head together with
-    /// `head_end`, the offset in `buf` just past the empty line that
-    /// terminates the head. The message body, if any, starts there.
-    ///
-    /// On `Status::Partial` or an error, slots in `headers` may have been
-    /// overwritten with rows parsed before the parser stopped.
-    ///
-    /// `Status::Partial` means `buf` ends before the head does. The parser
-    /// keeps no state between calls, so each retry with a longer buffer
-    /// parses it again from the start. In streaming code, limit the head
-    /// size and the number or duration of retries. Otherwise a head that
-    /// arrives in many small reads costs time quadratic in its length.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the head is syntactically invalid or has more
-    /// header rows than `headers` can hold. [`Error::kind`] tells the two
-    /// apart.
-    #[inline]
-    pub fn parse(
-        buf: &'buf [u8],
-        headers: &'hdr mut [Header<'buf>],
-    ) -> Result<(ResponseHead<'hdr, 'buf>, usize)> {
-        parse_head(buf, as_uninit(headers), start_line::parse_status_line)
-    }
-
-    /// Parses a SIP response head into uninitialized header storage.
-    ///
-    /// This behaves like [`ResponseHead::parse`] but lets callers skip
-    /// initializing `headers` up front, which matters for large header
-    /// storage.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the head is syntactically invalid or has more
-    /// header rows than `headers` can hold. [`Error::kind`] tells the two
-    /// apart.
-    #[inline]
-    pub fn parse_uninit(
-        buf: &'buf [u8],
-        headers: &'hdr mut [MaybeUninit<Header<'buf>>],
-    ) -> Result<(ResponseHead<'hdr, 'buf>, usize)> {
-        parse_head(buf, headers, start_line::parse_status_line)
-    }
-}
-
-// The request and response entry points only differ in how they parse the
-// start-line, so everything else is shared here.
-#[inline]
-fn parse_head<'hdr, 'buf, S>(
-    buf: &'buf [u8],
-    headers: &'hdr mut [MaybeUninit<Header<'buf>>],
-    parse_start_line: fn(&mut Bytes<'buf>) -> Result<S>,
-) -> Result<(MessageHead<'hdr, 'buf, S>, usize)> {
-    let mut bytes = complete!(init_head_bytes(buf));
-    let start_line = complete!(parse_start_line(&mut bytes));
-    let headers = complete!(header::parse_headers(headers, &mut bytes));
-
-    Ok(Status::Complete((MessageHead { start_line, headers }, bytes.pos())))
-}
-
-/// Views initialized header storage as uninitialized storage so that both
-/// public entry points can share [`parse_head`].
+/// A SIP request head that the parser fills in place.
 ///
-/// This is sound only because the parser never writes an uninitialized value
-/// into a slot. `header::parse_headers` only ever writes complete `Header`
-/// values, so the caller's storage is still fully initialized once the
-/// mutable borrow ends.
-#[inline]
-fn as_uninit<'hdr, 'buf>(
-    headers: &'hdr mut [Header<'buf>],
-) -> &'hdr mut [MaybeUninit<Header<'buf>>] {
-    // SAFETY: `MaybeUninit<T>` has the same layout as `T`. See the function
-    // documentation for why the slice stays initialized. `Header` is `Copy`,
-    // so overwriting a slot without dropping its old value leaks nothing.
-    unsafe {
-        &mut *(headers as *mut [Header<'buf>]
-            as *mut [MaybeUninit<Header<'buf>>])
+/// This is a syntactic view over the request-line and header rows. It does
+/// not perform semantic decoding.
+pub type RequestHead<'hdr, 'buf> = MessageHead<'hdr, 'buf, RequestLine<'buf>>;
+
+/// A SIP response head that the parser fills in place.
+///
+/// This is a syntactic view over the status-line and header rows. It does
+/// not perform semantic decoding.
+pub type ResponseHead<'hdr, 'buf> = MessageHead<'hdr, 'buf, StatusLine<'buf>>;
+
+impl<'hdr, 'buf, S: Default> MessageHead<'hdr, 'buf, S> {
+    /// Creates an empty head that stores header rows in `headers`.
+    #[inline]
+    pub fn new(
+        headers: &'hdr mut Headers<'buf>,
+    ) -> MessageHead<'hdr, 'buf, S> {
+        MessageHead { start_line: S::default(), headers }
+    }
+}
+
+// Parsing takes no options for now. A configurable parser type can be
+// added once an option is actually needed.
+impl<'hdr, 'buf> RequestHead<'hdr, 'buf> {
+    /// Parses a SIP request head from the beginning of `buf` into this head.
+    ///
+    /// Header rows are written into `self.headers` in wire order. On
+    /// [`Status::Complete`], this returns `head_end`, the offset in `buf` just
+    /// past the empty line that terminates the head. The message body, if any,
+    /// starts there.
+    ///
+    /// The head is reset first, so after `Status::Partial` or an error it
+    /// holds exactly what this call parsed before stopping.
+    ///
+    /// `Status::Partial` means `buf` ends before the head does. The parser
+    /// keeps no state between calls, so each retry with a longer buffer parses
+    /// it again from the start. In streaming code, limit the head size and the
+    /// number or duration of retries. Otherwise a head that arrives in many
+    /// small reads costs time quadratic in its length.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the head is syntactically invalid or has more
+    /// header rows than `self.headers` can hold. [`Error::kind`] tells the
+    /// two apart.
+    pub fn parse(&mut self, buf: &'buf [u8]) -> Result<usize> {
+        parse_head(self, buf, start_line::parse_request_line)
+    }
+}
+
+impl<'hdr, 'buf> ResponseHead<'hdr, 'buf> {
+    /// Parses a SIP response head from the beginning of `buf` into this
+    /// head.
+    ///
+    /// Header rows are written into `self.headers` in wire order. On
+    /// [`Status::Complete`], this returns `head_end`, the offset in `buf` just
+    /// past the empty line that terminates the head. The message body, if any,
+    /// starts there.
+    ///
+    /// The head is reset first, so after `Status::Partial` or an error it
+    /// holds exactly what this call parsed before stopping.
+    ///
+    /// `Status::Partial` means `buf` ends before the head does. The parser
+    /// keeps no state between calls, so each retry with a longer buffer parses
+    /// it again from the start. In streaming code, limit the head size and the
+    /// number or duration of retries. Otherwise a head that arrives in many
+    /// small reads costs time quadratic in its length.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the head is syntactically invalid or has more
+    /// header rows than `self.headers` can hold. [`Error::kind`] tells the two
+    /// apart.
+    pub fn parse(&mut self, buf: &'buf [u8]) -> Result<usize> {
+        parse_head(self, buf, start_line::parse_status_line)
     }
 }
 
@@ -243,6 +173,24 @@ impl<T> Status<T> {
             }
         }
     }
+}
+
+// The request and response entry points only differ in how they parse the
+// start-line, so everything else is shared here.
+#[inline]
+fn parse_head<'buf, S: Default>(
+    head: &mut MessageHead<'_, 'buf, S>,
+    buf: &'buf [u8],
+    parse_start_line: fn(&mut Bytes<'buf>, &mut S) -> Result<()>,
+) -> Result<usize> {
+    head.start_line = S::default();
+    head.headers.clear();
+
+    let mut bytes = complete!(init_head_bytes(buf));
+    complete!(parse_start_line(&mut bytes, &mut head.start_line));
+    complete!(header::parse_headers(head.headers, &mut bytes));
+
+    Ok(Status::Complete(bytes.pos()))
 }
 
 #[inline]
@@ -277,7 +225,8 @@ mod tests {
 
     const N_HEADERS: usize = 4;
 
-    // Defines a test that parses `$buf` as `$head_ty`. Three forms exist:
+    // Defines a test that parses `$buf` with `$head_ty::parse`. Three forms
+    // exist:
     //
     // * `|head| body` expects a complete head that consumes all of `$buf`
     //   and runs `body` against it.
@@ -286,10 +235,13 @@ mod tests {
     //
     // Every form accepts optional header storage after `$buf`.
     macro_rules! head_test {
-        ($head_ty:ident { $name:ident, $buf:expr, => $($expect:tt)+ }) => {
+        ($head_ty:ident {
+            $name:ident, $buf:expr, => $($expect:tt)+
+        }) => {
             head_test! {
                 $head_ty {
-                    $name, $buf, [Header::EMPTY; N_HEADERS], => $($expect)+
+                    $name, $buf, HeaderBuf::<N_HEADERS>::new(),
+                    => $($expect)+
                 }
             }
         };
@@ -300,7 +252,8 @@ mod tests {
             fn $name() {
                 let buf: &[u8] = $buf.as_ref();
                 let mut headers = $headers;
-                let status = $head_ty::parse(buf, &mut headers);
+                let mut head = $head_ty::new(&mut headers);
+                let status = head.parse(buf);
                 assert_eq!(status, Ok(Status::Partial));
             }
         };
@@ -312,7 +265,8 @@ mod tests {
             fn $name() {
                 let buf: &[u8] = $buf.as_ref();
                 let mut headers = $headers;
-                let err = $head_ty::parse(buf, &mut headers).unwrap_err();
+                let mut head = $head_ty::new(&mut headers);
+                let err = head.parse(buf).unwrap_err();
                 assert_eq!(err.kind(), ErrorKind::$kind);
             }
         };
@@ -321,7 +275,8 @@ mod tests {
         }) => {
             head_test! {
                 $head_ty {
-                    $name, $buf, [Header::EMPTY; N_HEADERS], |$head| $body
+                    $name, $buf, HeaderBuf::<N_HEADERS>::new(),
+                    |$head| $body
                 }
             }
         };
@@ -332,8 +287,8 @@ mod tests {
             fn $name() {
                 let buf: &[u8] = $buf.as_ref();
                 let mut headers = $headers;
-                let ($head, head_end) =
-                    $head_ty::parse(buf, &mut headers).unwrap().unwrap();
+                let mut $head = $head_ty::new(&mut headers);
+                let head_end = $head.parse(buf).unwrap().unwrap();
                 assert_eq!(head_end, buf.len());
 
                 $body
@@ -342,11 +297,15 @@ mod tests {
     }
 
     macro_rules! req {
-        ($($input:tt)*) => { head_test! { RequestHead { $($input)* } } };
+        ($($input:tt)*) => {
+            head_test! { RequestHead { $($input)* } }
+        };
     }
 
     macro_rules! res {
-        ($($input:tt)*) => { head_test! { ResponseHead { $($input)* } } };
+        ($($input:tt)*) => {
+            head_test! { ResponseHead { $($input)* } }
+        };
     }
 
     // RFC 3261, Section 7.1:
@@ -361,9 +320,9 @@ mod tests {
           Content-Length: 0\r\n\
           \r\n",
         |head| {
-            assert_eq!(head.start_line.method, "INVITE");
-            assert_eq!(head.start_line.uri, "sip:bob@example.com");
-            assert_eq!(head.start_line.version, "SIP/2.0");
+            assert_eq!(head.start_line.method, Some("INVITE"));
+            assert_eq!(head.start_line.uri, Some("sip:bob@example.com"));
+            assert_eq!(head.start_line.version, Some("SIP/2.0"));
 
             assert_eq!(head.headers.len(), 2);
             assert_eq!(head.headers[0].name, "Via");
@@ -446,9 +405,9 @@ mod tests {
           Content-Length: 0\r\n\
           \r\n",
         |head| {
-            assert_eq!(head.start_line.method, "INVITE");
-            assert_eq!(head.start_line.uri, "sip:bob@example.com");
-            assert_eq!(head.start_line.version, "SIP/2.0");
+            assert_eq!(head.start_line.method, Some("INVITE"));
+            assert_eq!(head.start_line.uri, Some("sip:bob@example.com"));
+            assert_eq!(head.start_line.version, Some("SIP/2.0"));
         }
     }
 
@@ -464,9 +423,9 @@ mod tests {
           Content-Length: 0\r\n\
           \r\n",
         |head| {
-            assert_eq!(head.start_line.method, "INVITE");
-            assert_eq!(head.start_line.uri, "sip:bob@example.com");
-            assert_eq!(head.start_line.version, "SIP/2.0");
+            assert_eq!(head.start_line.method, Some("INVITE"));
+            assert_eq!(head.start_line.uri, Some("sip:bob@example.com"));
+            assert_eq!(head.start_line.version, Some("SIP/2.0"));
 
             assert_eq!(head.headers.len(), 3);
             assert_eq!(head.headers[0].name, "Route");
@@ -498,7 +457,7 @@ mod tests {
           Via: SIP/2.0/UDP host.example.com\r\n\
           Content-Length: 0\r\n\
           \r\n",
-        [Header::EMPTY; 1],
+        HeaderBuf::<1>::new(),
         => Err(TooManyHeaders)
     }
 
@@ -507,7 +466,7 @@ mod tests {
         b"INVITE sip:bob@example.com SIP/2.0\r\n\
           name: value\r\n\
           \r\n",
-        [Header::EMPTY; 1],
+        HeaderBuf::<1>::new(),
         |head| {
             assert_eq!(head.headers[0].name, "name");
             assert_eq!(head.headers[0].value, "value");
@@ -528,9 +487,9 @@ mod tests {
           Content-Length: 0\r\n\
           \r\n",
         |head| {
-            assert_eq!(head.start_line.method, "INVITE");
-            assert_eq!(head.start_line.uri, "sip:bob@example.com");
-            assert_eq!(head.start_line.version, "SIP/2.0");
+            assert_eq!(head.start_line.method, Some("INVITE"));
+            assert_eq!(head.start_line.uri, Some("sip:bob@example.com"));
+            assert_eq!(head.start_line.version, Some("SIP/2.0"));
 
             assert_eq!(head.headers.len(), 2);
             assert_eq!(head.headers[0].name, "Subject");
@@ -558,9 +517,9 @@ mod tests {
           Subject :lunch\r\n\
           \r\n",
         |head| {
-            assert_eq!(head.start_line.method, "INVITE");
-            assert_eq!(head.start_line.uri, "sip:bob@example.com");
-            assert_eq!(head.start_line.version, "SIP/2.0");
+            assert_eq!(head.start_line.method, Some("INVITE"));
+            assert_eq!(head.start_line.uri, Some("sip:bob@example.com"));
+            assert_eq!(head.start_line.version, Some("SIP/2.0"));
 
             assert_eq!(head.headers.len(), 1);
             assert_eq!(head.headers[0].name, "Subject");
@@ -593,9 +552,9 @@ mod tests {
           Content-Length: 0\r\n\
           \r\n",
         |head| {
-            assert_eq!(head.start_line.method, "INVITE");
-            assert_eq!(head.start_line.uri, "sip:bob@example.com");
-            assert_eq!(head.start_line.version, "sip/2.0");
+            assert_eq!(head.start_line.method, Some("INVITE"));
+            assert_eq!(head.start_line.uri, Some("sip:bob@example.com"));
+            assert_eq!(head.start_line.version, Some("sip/2.0"));
         }
     }
 
@@ -655,9 +614,9 @@ mod tests {
           Content-Length: 0\r\n\
           \r\n",
         |head| {
-            assert_eq!(head.start_line.method, "INVITE");
-            assert_eq!(head.start_line.uri, "sip:bob@[2001:db8::1]");
-            assert_eq!(head.start_line.version, "SIP/2.0");
+            assert_eq!(head.start_line.method, Some("INVITE"));
+            assert_eq!(head.start_line.uri, Some("sip:bob@[2001:db8::1]"));
+            assert_eq!(head.start_line.version, Some("SIP/2.0"));
         }
     }
 
@@ -760,9 +719,9 @@ mod tests {
           Subject: \xF0\x9F\x98\x80\r\n\
           \r\n",
         |head| {
-            assert_eq!(head.start_line.method, "INVITE");
-            assert_eq!(head.start_line.uri, "sip:bob@example.com");
-            assert_eq!(head.start_line.version, "SIP/2.0");
+            assert_eq!(head.start_line.method, Some("INVITE"));
+            assert_eq!(head.start_line.uri, Some("sip:bob@example.com"));
+            assert_eq!(head.start_line.version, Some("SIP/2.0"));
             assert_eq!(head.headers[0].name, "Subject");
             assert_eq!(head.headers[0].value, "\u{1f600}");
         }
@@ -775,12 +734,12 @@ mod tests {
             Content-Length: 3\r\n\
             \r\n\
             foo";
-        let mut headers = [Header::EMPTY; N_HEADERS];
+        let mut headers = HeaderBuf::<N_HEADERS>::new();
+        let mut head = RequestHead::new(&mut headers);
 
-        let (head, head_end) =
-            RequestHead::parse(buf, &mut headers).unwrap().unwrap();
+        let head_end = head.parse(buf).unwrap().unwrap();
 
-        assert_eq!(head.start_line.method, "INVITE");
+        assert_eq!(head.start_line.method, Some("INVITE"));
         assert_eq!(&buf[head_end..], b"foo");
     }
 
@@ -802,9 +761,9 @@ mod tests {
           Content-Length: 0\r\n\
           \r\n",
         |head| {
-            assert_eq!(head.start_line.version, "SIP/2.0");
-            assert_eq!(head.start_line.status_code, "200");
-            assert_eq!(head.start_line.reason_phrase, "OK");
+            assert_eq!(head.start_line.version, Some("SIP/2.0"));
+            assert_eq!(head.start_line.status_code, Some("200"));
+            assert_eq!(head.start_line.reason_phrase, Some("OK"));
 
             assert_eq!(head.headers.len(), 2);
             assert_eq!(head.headers[0].name, "Via");
@@ -855,9 +814,9 @@ mod tests {
           Content-Length: 0\r\n\
           \r\n",
         |head| {
-            assert_eq!(head.start_line.version, "SIP/2.0");
-            assert_eq!(head.start_line.status_code, "200");
-            assert_eq!(head.start_line.reason_phrase, "");
+            assert_eq!(head.start_line.version, Some("SIP/2.0"));
+            assert_eq!(head.start_line.status_code, Some("200"));
+            assert_eq!(head.start_line.reason_phrase, Some(""));
         }
     }
 
@@ -885,7 +844,7 @@ mod tests {
           Content-Length: 0\r\n\
           \r\n",
         |head| {
-            assert_eq!(head.start_line.reason_phrase, "Not\t Found");
+            assert_eq!(head.start_line.reason_phrase, Some("Not\t Found"));
         }
     }
 
@@ -911,9 +870,9 @@ mod tests {
           Content-Length: 0\r\n\
           \r\n",
         |head| {
-            assert_eq!(head.start_line.version, "SIP/2.0");
-            assert_eq!(head.start_line.status_code, "200");
-            assert_eq!(head.start_line.reason_phrase, "100%20Trying");
+            assert_eq!(head.start_line.version, Some("SIP/2.0"));
+            assert_eq!(head.start_line.status_code, Some("200"));
+            assert_eq!(head.start_line.reason_phrase, Some("100%20Trying"));
         }
     }
 
@@ -947,61 +906,67 @@ mod tests {
           Content-Length: 0\r\n\
           \r\n",
         |head| {
-            assert_eq!(head.start_line.version, "SIP/2.0");
-            assert_eq!(head.start_line.status_code, "200");
-            assert_eq!(head.start_line.reason_phrase, "\u{1f600}");
+            assert_eq!(head.start_line.version, Some("SIP/2.0"));
+            assert_eq!(head.start_line.status_code, Some("200"));
+            assert_eq!(head.start_line.reason_phrase, Some("\u{1f600}"));
         }
     }
 
+    // `HeaderBuf::new` leaves every slot uninitialized, so these exercise
+    // the parser writing into storage that was never initialized.
     #[test]
-    fn parse_uninit_parses_request_head() {
+    fn uninit_storage_parses_request_head() {
         let buf = b"INVITE sip:bob@example.com SIP/2.0\r\n\
                     Via: SIP/2.0/UDP host.example.com\r\n\
                     Content-Length: 0\r\n\
                     \r\n";
-        let mut headers = [MaybeUninit::<Header>::uninit(); N_HEADERS];
+        let mut headers = HeaderBuf::<N_HEADERS>::new();
+        let mut head = RequestHead::new(&mut headers);
 
-        let (head, head_end) =
-            RequestHead::parse_uninit(buf, &mut headers).unwrap().unwrap();
+        let head_end = head.parse(buf).unwrap().unwrap();
 
         assert_eq!(head_end, buf.len());
-        assert_eq!(head.start_line.method, "INVITE");
+        assert_eq!(head.start_line.method, Some("INVITE"));
         assert_eq!(head.headers.len(), 2);
         assert_eq!(head.headers[0].name, "Via");
         assert_eq!(head.headers[1].value, "0");
     }
 
     #[test]
-    fn parse_uninit_parses_response_head() {
+    fn uninit_storage_parses_response_head() {
         let buf = b"SIP/2.0 180 Ringing\r\n\
                     Content-Length: 0\r\n\
                     \r\n";
-        let mut headers = [MaybeUninit::<Header>::uninit(); N_HEADERS];
+        let mut headers = HeaderBuf::<N_HEADERS>::new();
+        let mut head = ResponseHead::new(&mut headers);
 
-        let (head, head_end) =
-            ResponseHead::parse_uninit(buf, &mut headers).unwrap().unwrap();
+        let head_end = head.parse(buf).unwrap().unwrap();
 
         assert_eq!(head_end, buf.len());
-        assert_eq!(head.start_line.status_code, "180");
-        assert_eq!(head.start_line.reason_phrase, "Ringing");
+        assert_eq!(head.start_line.status_code, Some("180"));
+        assert_eq!(head.start_line.reason_phrase, Some("Ringing"));
         assert_eq!(head.headers.len(), 1);
     }
 
+    // The rows that fit stay readable after the error.
     #[test]
-    fn parse_uninit_rejects_when_header_storage_is_too_small() {
+    fn uninit_storage_rejects_when_header_storage_is_too_small() {
         let buf = b"INVITE sip:bob@example.com SIP/2.0\r\n\
                     Via: SIP/2.0/UDP host.example.com\r\n\
                     Content-Length: 0\r\n\
                     \r\n";
-        let mut headers = [MaybeUninit::<Header>::uninit(); 1];
+        let mut headers = HeaderBuf::<1>::new();
+        let mut head = RequestHead::new(&mut headers);
 
-        let err = RequestHead::parse_uninit(buf, &mut headers).unwrap_err();
+        let err = head.parse(buf).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::TooManyHeaders);
+        assert_eq!(head.headers.len(), 1);
+        assert_eq!(head.headers[0].name, "Via");
     }
 
-    // Storage is only borrowed for the duration of the call, so the same
-    // array can be reused for the next message without re-initializing it.
+    // Every parse resets the head first, so the same head can be reused for
+    // the next message, and a `Partial` leaves nothing from earlier calls.
     #[test]
     fn header_storage_is_reusable_across_parses() {
         let partial = b"INVITE sip:bob@example.com SIP/2.0\r\n\
@@ -1009,14 +974,15 @@ mod tests {
         let complete = b"BYE sip:bob@example.com SIP/2.0\r\n\
                          Content-Length: 0\r\n\
                          \r\n";
-        let mut headers = [Header::EMPTY; N_HEADERS];
+        let mut headers = HeaderBuf::<N_HEADERS>::new();
+        let mut head = RequestHead::new(&mut headers);
 
-        let status = RequestHead::parse(partial, &mut headers);
+        let status = head.parse(partial);
         assert_eq!(status, Ok(Status::Partial));
+        assert_eq!(head.start_line.method, Some("INVITE"));
 
-        let (head, _) =
-            RequestHead::parse(complete, &mut headers).unwrap().unwrap();
-        assert_eq!(head.start_line.method, "BYE");
+        head.parse(complete).unwrap().unwrap();
+        assert_eq!(head.start_line.method, Some("BYE"));
         assert_eq!(head.headers.len(), 1);
         assert_eq!(head.headers[0].name, "Content-Length");
     }
@@ -1028,16 +994,17 @@ mod tests {
         let buf = b"INVITE sip:bob@example.com SIP/2.0\r\n\
                     Subject: lunch\r\n\
                     \r\n";
-        let mut headers = [Header::EMPTY; N_HEADERS];
+        let mut headers = HeaderBuf::<N_HEADERS>::new();
+        let mut head = RequestHead::new(&mut headers);
 
-        let (head, _) =
-            RequestHead::parse(buf, &mut headers).unwrap().unwrap();
+        head.parse(buf).unwrap().unwrap();
 
         let buf_range = buf.as_ptr_range();
+        let line = head.start_line;
         let tokens = [
-            head.start_line.method,
-            head.start_line.uri,
-            head.start_line.version,
+            line.method.unwrap(),
+            line.uri.unwrap(),
+            line.version.unwrap(),
             head.headers[0].name,
             head.headers[0].value,
         ];
@@ -1168,13 +1135,93 @@ mod tests {
     #[test]
     fn error_display_describes_kind() {
         let buf = b"INV@TE sip:bob@example.com SIP/2.0\r\n\r\n";
-        let mut headers = [Header::EMPTY; N_HEADERS];
+        let mut headers = HeaderBuf::<N_HEADERS>::new();
+        let mut head = RequestHead::new(&mut headers);
 
-        let err = RequestHead::parse(buf, &mut headers).unwrap_err();
+        let err = head.parse(buf).unwrap_err();
 
         assert_eq!(
             std::string::ToString::to_string(&err),
             "invalid SIP method",
         );
+    }
+
+    // The tests below cover what `Status::Partial` and errors leave in the
+    // head.
+
+    const INVITE: &[u8] = b"INVITE sip:bob@example.com SIP/2.0\r\n\
+        Via: SIP/2.0/UDP pc33.example.com;branch=z9hG4bK776asdhds\r\n\
+        Content-Length: 0\r\n\
+        \r\n";
+
+    #[test]
+    fn fills_fields_in_order_for_every_prefix() {
+        for end in 0..INVITE.len() {
+            let mut headers = HeaderBuf::<N_HEADERS>::new();
+            let mut head = RequestHead::new(&mut headers);
+
+            let status = head.parse(&INVITE[..end]);
+
+            assert_eq!(status, Ok(Status::Partial), "end={end}");
+            let line = head.start_line;
+            assert!(line.uri.is_none() || line.method.is_some());
+            assert!(line.version.is_none() || line.uri.is_some());
+            assert!(head.headers.is_empty() || line.version.is_some());
+        }
+    }
+
+    #[test]
+    fn exposes_rows_parsed_before_partial() {
+        let mut headers = HeaderBuf::<N_HEADERS>::new();
+        let mut head = RequestHead::new(&mut headers);
+        let buf = b"OPTIONS sip:carol@example.com SIP/2.0\r\n\
+            Max-Forwards: 70\r\n\
+            To:";
+
+        let status = head.parse(buf);
+
+        assert_eq!(status, Ok(Status::Partial));
+        assert_eq!(head.start_line.method, Some("OPTIONS"));
+        assert_eq!(head.start_line.version, Some("SIP/2.0"));
+        assert_eq!(head.headers.len(), 1);
+        assert_eq!(head.headers[0].name, "Max-Forwards");
+    }
+
+    #[test]
+    fn exposes_start_line_fields_parsed_before_error() {
+        let mut headers = HeaderBuf::<N_HEADERS>::new();
+        let mut head = ResponseHead::new(&mut headers);
+        let buf = b"SIP/2.0 20 OK\r\n\r\n";
+
+        let err = head.parse(buf).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::StatusCode);
+        assert_eq!(head.start_line.version, Some("SIP/2.0"));
+        assert_eq!(head.start_line.status_code, None);
+    }
+
+    #[test]
+    fn resets_head_before_each_parse() {
+        let mut headers = HeaderBuf::<N_HEADERS>::new();
+        let mut head = RequestHead::new(&mut headers);
+
+        assert!(head.parse(INVITE).is_ok());
+        let status = head.parse(b"BYE");
+        assert_eq!(status, Ok(Status::Partial));
+
+        assert_eq!(head.start_line, RequestLine::default());
+        assert!(head.headers.is_empty());
+    }
+
+    #[test]
+    fn zero_capacity_storage_parses_head_without_rows() {
+        let mut headers = HeaderBuf::<0>::new();
+        let mut head = RequestHead::new(&mut headers);
+        let buf = b"ACK sip:bob@example.com SIP/2.0\r\n\r\n";
+
+        let status = head.parse(buf);
+
+        assert_eq!(status, Ok(Status::Complete(buf.len())));
+        assert_eq!(head.headers.capacity(), 0);
     }
 }

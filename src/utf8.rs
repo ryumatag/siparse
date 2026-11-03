@@ -1,6 +1,6 @@
 use core::ops::RangeInclusive;
 
-use crate::{iter::Bytes, parser::Status};
+use crate::{iter::Bytes, parse::Status};
 
 /// A UTF-8 validation error produced by the parser's modern UTF-8 checker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -11,7 +11,7 @@ pub(crate) struct Utf8Error {
 #[inline]
 pub(crate) fn parse_utf8_char(
     bytes: &mut Bytes<'_>,
-) -> Result<crate::parser::Status<()>, Utf8Error> {
+) -> Result<crate::parse::Status<()>, Utf8Error> {
     let first = next!(bytes);
 
     match first {
@@ -89,7 +89,7 @@ impl Utf8Error {
 #[cfg(test)]
 mod tests {
     use super::{parse_utf8_char, parse_utf8_run, Utf8Error};
-    use crate::{iter::Bytes, parser::Status};
+    use crate::{iter::Bytes, parse::Status};
 
     fn parser_accepts_utf8(bytes: &[u8]) -> bool {
         let mut input = Bytes::new(bytes);

@@ -1,61 +1,66 @@
 use crate::{
     error::Error,
     iter::Bytes,
-    parser::{Result, Status},
+    parse::{Result, Status},
     simd,
     token::is_method_token,
     utf8::parse_utf8_run,
 };
 
-/// A parsed SIP request-line.
+/// SIP request-line fields, each set once the parser has validated it.
 ///
-/// Each field borrows from the parsed input buffer. A `RequestLine` is only
-/// produced for a complete head, so every field is present.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Each field borrows from the parsed input buffer. Fields are filled in wire
+/// order, so after [`Status::Partial`] or an error the fields parsed before
+/// the parser stopped are `Some` and the rest are `None`. After
+/// [`Status::Complete`], every field is `Some`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RequestLine<'buf> {
     /// The request method token, such as `INVITE`.
-    pub method: &'buf str,
+    pub method: Option<&'buf str>,
     /// The raw request URI. It is not percent-decoded.
-    pub uri: &'buf str,
+    pub uri: Option<&'buf str>,
     /// The SIP version token as it appeared on the wire, such as `SIP/2.0`.
-    pub version: &'buf str,
+    pub version: Option<&'buf str>,
 }
 
-/// A parsed SIP status-line.
+/// SIP status-line fields, each set once the parser has validated it.
 ///
-/// Each field borrows from the parsed input buffer. A `StatusLine` is only
-/// produced for a complete head, so every field is present.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Each field borrows from the parsed input buffer. Fields are filled in wire
+/// order, so after [`Status::Partial`] or an error the fields parsed before
+/// the parser stopped are `Some` and the rest are `None`. After
+/// [`Status::Complete`], every field is `Some`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct StatusLine<'buf> {
     /// The SIP version token as it appeared on the wire, such as `SIP/2.0`.
-    pub version: &'buf str,
+    pub version: Option<&'buf str>,
     /// The three-digit status code, such as `200`.
     ///
     /// This stays a string because converting it to an integer is semantic
     /// decoding, which belongs to the consumer.
-    pub status_code: &'buf str,
+    pub status_code: Option<&'buf str>,
     /// The raw reason phrase, possibly empty. `%`-escapes are not decoded.
-    pub reason_phrase: &'buf str,
+    pub reason_phrase: Option<&'buf str>,
 }
 
 #[inline]
 pub(super) fn parse_request_line<'buf>(
     bytes: &mut Bytes<'buf>,
-) -> Result<RequestLine<'buf>> {
+    line: &mut RequestLine<'buf>,
+) -> Result<()> {
     // RFC 3261, Section 7.1 defines:
     //
     //     Request-Line  =  Method SP Request-URI SP SIP-Version CRLF
     //
     // Ref: https://www.rfc-editor.org/rfc/rfc3261.html#section-7.1
 
-    let method = complete!(parse_method(bytes));
+    line.method = Some(complete!(parse_method(bytes)));
     ensure!(bytes.next() == b' ' => Error::method());
-    let uri = complete!(parse_request_uri(bytes));
+    line.uri = Some(complete!(parse_request_uri(bytes)));
     ensure!(bytes.next() == b' ' => Error::request_uri());
-    let version = complete!(parse_version(bytes));
+    line.version = Some(complete!(parse_version(bytes)));
     complete!(parse_crlf(bytes, Error::version()));
 
-    Ok(Status::Complete(RequestLine { method, uri, version }))
+    Ok(Status::Complete(()))
 }
 
 #[allow(missing_docs)]
@@ -104,23 +109,24 @@ pub fn parse_request_uri<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
 #[inline]
 pub(super) fn parse_status_line<'buf>(
     bytes: &mut Bytes<'buf>,
-) -> Result<StatusLine<'buf>> {
+    line: &mut StatusLine<'buf>,
+) -> Result<()> {
     // RFC 3261, Section 7.2 defines:
     //
     //     Status-Line  =  SIP-Version SP Status-Code SP Reason-Phrase CRLF
     //
     // Ref: https://www.rfc-editor.org/rfc/rfc3261.html#section-7.2
 
-    let version = complete!(parse_version(bytes));
+    line.version = Some(complete!(parse_version(bytes)));
     ensure!(bytes.next() == b' ' => Error::version());
-    let status_code = complete!(parse_status_code(bytes));
+    line.status_code = Some(complete!(parse_status_code(bytes)));
     ensure!(bytes.next() == b' ' => Error::status_code());
-    let reason_phrase = complete!(parse_reason_phrase(bytes));
+    line.reason_phrase = Some(complete!(parse_reason_phrase(bytes)));
     // `parse_reason_phrase` only stops before `CR`, so `parse_crlf` never
     // sees another byte here.
     complete!(parse_crlf(bytes, Error::reason_phrase()));
 
-    Ok(Status::Complete(StatusLine { version, status_code, reason_phrase }))
+    Ok(Status::Complete(()))
 }
 
 #[allow(missing_docs)]
@@ -151,8 +157,8 @@ pub fn parse_reason_phrase<'buf>(
 
         // The SIMD pass above consumes every byte for which
         // `is_reason_phrase_octet` returns true. The byte we peek next is
-        // therefore guaranteed to be outside that set, so there is no arm
-        // here for `is_reason_phrase_octet`.
+        // therefore guaranteed to be outside that set, so there is no arm here
+        // for `is_reason_phrase_octet`.
         match peek!(bytes) {
             b'\r' => {
                 // SAFETY: Every consumed byte is an ASCII
@@ -249,8 +255,8 @@ fn parse_crlf(bytes: &mut Bytes<'_>, unexpected: Error) -> Result<()> {
         Some([b'\r', _]) => Err(Error::bare_cr()),
         Some([b'\n', _]) => Err(Error::bare_lf()),
         Some(_) => Err(unexpected),
-        // Fewer than two bytes remain. The input is partial unless the byte
-        // we do have already rules out `CRLF`.
+        // Fewer than two bytes remain. The input is partial unless the byte we
+        // do have already rules out `CRLF`.
         None => match bytes.peek() {
             None | Some(b'\r') => Ok(Status::Partial),
             Some(b'\n') => Err(Error::bare_lf()),

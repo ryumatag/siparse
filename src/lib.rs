@@ -17,22 +17,24 @@ on every target. SIMD fast paths for x86_64 and aarch64 are planned.
 Here is a quick example that shows how to parse a typical SIP request:
 
 ```
-use siparse::{Header, RequestHead, Status};
+use siparse::{HeaderBuf, RequestHead, Status};
 
 let buf = b"INVITE sip:bob@example.com SIP/2.0\r\n\
             Via: SIP/2.0/UDP pc33.example.com;branch=z9hG4bK776asdhds\r\n\
             Content-Length: 0\r\n\
             \r\n";
 
-let mut headers = [Header::EMPTY; 16];
-let Status::Complete((head, head_end)) = RequestHead::parse(buf, &mut headers)?
-else {
-    // Read more input and parse again from the beginning.
+let mut headers = HeaderBuf::<16>::new();
+let mut head = RequestHead::new(&mut headers);
+
+let Status::Complete(head_end) = head.parse(buf)? else {
+    // `head` holds what was parsed so far. Read more input and parse again
+    // from the beginning.
     return Ok(());
 };
 
-assert_eq!(head.start_line.method, "INVITE");
-assert_eq!(head.start_line.uri, "sip:bob@example.com");
+assert_eq!(head.start_line.method, Some("INVITE"));
+assert_eq!(head.start_line.uri, Some("sip:bob@example.com"));
 assert_eq!(head.headers[0].name, "Via");
 assert_eq!(head.headers[1].value, "0");
 assert_eq!(head_end, buf.len());
@@ -42,9 +44,15 @@ assert_eq!(head_end, buf.len());
 # Partial input
 
 [`Status::Partial`] is not an error. It means the buffer ends before the head
-does, and it carries no partial head. The parser keeps no state between calls,
-so the caller reads more input and parses the whole buffer again from the
-beginning, reusing the same header storage.
+does. The head then holds the start-line fields and header rows parsed so far,
+so a caller can act on them early, for example to reject an unknown method
+before the rest arrives. The parser keeps no state between calls, so the
+caller reads more input and parses the whole buffer again from the beginning.
+Each parse resets the head first.
+
+The head and its [`HeaderBuf`] borrow the buffer they were filled from. When
+the buffer grows between parses, create them again for each parse.
+`HeaderBuf::new` leaves its slots uninitialized, so this costs nothing.
 
 Because every retry starts over, a head that arrives in many small reads costs
 time quadratic in its length. On stream transports, limit the head size. A
@@ -57,7 +65,7 @@ because the parser skips leading `CRLF`s and reports `Partial` again.
 
 # Keeping parsed data
 
-A parsed [`MessageHead`] borrows the input buffer, so it cannot outlive that
+A filled [`MessageHead`] borrows the input buffer, so it cannot outlive that
 buffer or survive a reallocation of it, such as a growing [`BytesMut`]. Callers
 that need to keep tokens record where each one lies while the head is still
 alive, then let the head go. A token's start offset is
@@ -69,7 +77,7 @@ without copying it:
 
 ```
 use bytes::{Bytes, BytesMut};
-use siparse::{Header, RequestHead, Status};
+use siparse::{HeaderBuf, RequestHead, Status};
 
 let mut buf = BytesMut::from(
     &b"OPTIONS sip:carol@example.com SIP/2.0\r\n\
@@ -77,22 +85,22 @@ let mut buf = BytesMut::from(
        \r\n"[..],
 );
 
-let mut headers = [Header::EMPTY; 16];
-let (value_ranges, head_end) = match RequestHead::parse(&buf, &mut headers)? {
-    Status::Complete((head, head_end)) => {
-        let base = buf.as_ptr() as usize;
-        let ranges: Vec<_> = head
-            .headers
-            .iter()
-            .map(|header| {
-                let start = header.value.as_ptr() as usize - base;
-                start..start + header.value.len()
-            })
-            .collect();
-        (ranges, head_end)
-    }
+let mut headers = HeaderBuf::<16>::new();
+let mut head = RequestHead::new(&mut headers);
+let head_end = match head.parse(&buf)? {
+    Status::Complete(head_end) => head_end,
     Status::Partial => return Ok(()),
 };
+
+let base = buf.as_ptr() as usize;
+let value_ranges: Vec<_> = head
+    .headers
+    .iter()
+    .map(|header| {
+        let start = header.value.as_ptr() as usize - base;
+        start..start + header.value.len()
+    })
+    .collect();
 
 // The parsed head no longer borrows `buf`, so it can be split.
 let head_bytes = buf.split_to(head_end).freeze();
@@ -150,7 +158,7 @@ mod macros;
 
 mod error;
 mod iter;
-mod parser;
+mod parse;
 mod simd;
 mod token;
 mod utf8;
@@ -158,9 +166,9 @@ mod utf8;
 #[doc(inline)]
 pub use self::{
     error::{Error, ErrorKind},
-    parser::{
-        Header, MessageHead, RequestHead, RequestLine, ResponseHead, Status,
-        StatusLine,
+    parse::{
+        Header, HeaderBuf, Headers, MessageHead, RequestHead, RequestLine,
+        ResponseHead, Status, StatusLine,
     },
 };
 
@@ -170,7 +178,7 @@ pub mod _private {
     #[doc(hidden)]
     pub use super::{
         iter::Bytes,
-        parser::{
+        parse::{
             parse_header_name, parse_header_value, parse_method,
             parse_reason_phrase, parse_request_uri, parse_status_code,
             parse_version,
