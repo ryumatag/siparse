@@ -227,7 +227,7 @@ pub use self::{
     parse::{
         parse_ping, parse_pong, AnyHead, Header, HeaderBuf, Headers,
         MessageHead, RequestHead, RequestLine, ResponseHead, StartLine,
-        Status, StatusLine,
+        Status, StatusLine, ValueLines,
     },
 };
 

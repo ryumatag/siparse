@@ -11,6 +11,7 @@ use crate::{error::Error, iter::Bytes};
 pub use self::{
     header::{
         parse_header_name, parse_header_value, Header, HeaderBuf, Headers,
+        ValueLines,
     },
     keepalive::{parse_ping, parse_pong},
     start_line::{

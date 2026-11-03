@@ -1,4 +1,7 @@
-use core::{fmt, marker::PhantomData, mem::MaybeUninit, ops::Deref, slice};
+use core::{
+    fmt, iter::FusedIterator, marker::PhantomData, mem::MaybeUninit,
+    ops::Deref, slice,
+};
 
 use crate::{
     error::Error,
@@ -9,31 +12,9 @@ use crate::{
     utf8::parse_utf8_run,
 };
 
-/// A parsed SIP header row.
-///
-/// `Header` represents one header field row exactly as it appeared in the
-/// parsed head. Both fields borrow from the parsed input buffer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Header<'buf> {
-    /// The header field name, without the whitespace that may precede `:`.
-    ///
-    /// The name is not case-normalized and compact forms such as `v` for `Via`
-    /// are not expanded.
-    pub name: &'buf str,
-    /// The raw header field value, without the terminating `CRLF`.
-    ///
-    /// Leading `SP`, `HTAB`, and folds are not part of the value, because
-    /// RFC 3261's `HCOLON` makes them part of the separator. Trailing
-    /// whitespace is kept, since whether it carries meaning depends on the
-    /// header's grammar. A folded value keeps its interior `CRLF` and the
-    /// whitespace after it verbatim. Unfolding is left to the consumer.
-    ///
-    /// The value is modern UTF-8 and may contain ASCII controls or `DEL`
-    /// after an unpaired backslash. Header-specific quoted-string and
-    /// comment syntax is left to the consumer. See the crate's
-    /// [header value policy](crate#header-values).
-    pub value: &'buf str,
-}
+/// Fixed-capacity header row storage for up to `N` rows.
+pub type HeaderBuf<'buf, const N: usize> =
+    Headers<'buf, [MaybeUninit<Header<'buf>>; N]>;
 
 /// Header row storage that the parser fills without initializing it first.
 ///
@@ -54,9 +35,43 @@ pub struct Headers<'buf, R: ?Sized = [MaybeUninit<Header<'buf>>]> {
     rows: R,
 }
 
-/// Fixed-capacity header row storage for up to `N` rows.
-pub type HeaderBuf<'buf, const N: usize> =
-    Headers<'buf, [MaybeUninit<Header<'buf>>; N]>;
+/// A parsed SIP header row.
+///
+/// `Header` represents one header field row exactly as it appeared in the
+/// parsed head. Both fields borrow from the parsed input buffer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Header<'buf> {
+    /// The header field name, without the whitespace that may precede `:`.
+    ///
+    /// The name is not case-normalized and compact forms such as `v` for `Via`
+    /// are not expanded.
+    pub name: &'buf str,
+    /// The raw header field value, without the terminating `CRLF`.
+    ///
+    /// Leading `SP`, `HTAB`, and folds are not part of the value, because
+    /// RFC 3261's `HCOLON` makes them part of the separator. Trailing
+    /// whitespace is kept, since whether it carries meaning depends on the
+    /// header's grammar. A folded value keeps its interior `CRLF` and the
+    /// whitespace after it verbatim. [`Header::value_lines`] splits it at
+    /// those folds.
+    ///
+    /// The value is modern UTF-8 and may contain ASCII controls or `DEL`
+    /// after an unpaired backslash. Header-specific quoted-string and
+    /// comment syntax is left to the consumer. See the crate's
+    /// [header value policy](crate#header-values).
+    pub value: &'buf str,
+}
+
+/// An iterator over the lines of a folded header value.
+///
+/// This is created by [`Header::value_lines`]. See its documentation for
+/// details.
+#[derive(Clone, Debug)]
+pub struct ValueLines<'buf> {
+    /// The value from the start of the next line, or `None` once the last
+    /// line has been returned.
+    rest: Option<&'buf str>,
+}
 
 impl<'buf, const N: usize> HeaderBuf<'buf, N> {
     /// Creates empty storage for up to `N` header rows.
@@ -74,6 +89,22 @@ impl<'buf, const N: usize> Default for HeaderBuf<'buf, N> {
     #[inline]
     fn default() -> HeaderBuf<'buf, N> {
         HeaderBuf::new()
+    }
+}
+
+impl<const N: usize> fmt::Debug for HeaderBuf<'_, N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let headers: &Headers<'_> = self;
+        fmt::Debug::fmt(headers, f)
+    }
+}
+
+impl<'buf, const N: usize> Deref for HeaderBuf<'buf, N> {
+    type Target = [Header<'buf>];
+
+    #[inline]
+    fn deref(&self) -> &[Header<'buf>] {
+        (self as &Headers<'buf>).as_slice()
     }
 }
 
@@ -104,6 +135,12 @@ impl<'buf> Headers<'buf> {
     }
 }
 
+impl fmt::Debug for Headers<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.as_slice()).finish()
+    }
+}
+
 impl<'buf> Deref for Headers<'buf> {
     type Target = [Header<'buf>];
 
@@ -113,27 +150,64 @@ impl<'buf> Deref for Headers<'buf> {
     }
 }
 
-impl<'buf, const N: usize> Deref for HeaderBuf<'buf, N> {
-    type Target = [Header<'buf>];
+impl<'buf> Header<'buf> {
+    /// Returns the lines of the value, split at each fold.
+    ///
+    /// A fold is a `CRLF` followed by `SP` or `HTAB`. Each item is the text
+    /// between two folds, without the `CRLF` and the whitespace that starts
+    /// the next line. [RFC 3261 section 7.3.1] treats a fold as a single
+    /// `SP`, so joining the items with one `SP` gives the unfolded value.
+    /// The items borrow from the input buffer, so this does not allocate.
+    ///
+    /// Whitespace before a fold stays at the end of its line, just as the
+    /// RFC keeps it in the unfolded value. A value without folds, including
+    /// an empty one, yields itself as its only line.
+    ///
+    /// The parser only stores `CRLF` in a value as part of a fold. For a
+    /// `Header` built by hand, this splits at every `CRLF`.
+    ///
+    /// [RFC 3261 section 7.3.1]: https://www.rfc-editor.org/rfc/rfc3261#section-7.3.1
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use siparse::Header;
+    ///
+    /// let header = Header {
+    ///     name: "Subject",
+    ///     value: "I know you're there,\r\n   pick up the phone",
+    /// };
+    ///
+    /// let lines: Vec<&str> = header.value_lines().collect();
+    /// assert_eq!(lines, ["I know you're there,", "pick up the phone"]);
+    /// assert_eq!(lines.join(" "), "I know you're there, pick up the phone");
+    /// ```
+    #[inline]
+    pub fn value_lines(&self) -> ValueLines<'buf> {
+        ValueLines { rest: Some(self.value) }
+    }
+}
+
+impl<'buf> Iterator for ValueLines<'buf> {
+    type Item = &'buf str;
 
     #[inline]
-    fn deref(&self) -> &[Header<'buf>] {
-        (self as &Headers<'buf>).as_slice()
+    fn next(&mut self) -> Option<&'buf str> {
+        let rest = self.rest?;
+        match rest.split_once("\r\n") {
+            Some((line, next)) => {
+                self.rest = Some(next.trim_start_matches([' ', '\t']));
+                Some(line)
+            }
+            None => {
+                self.rest = None;
+                Some(rest)
+            }
+        }
     }
 }
 
-impl fmt::Debug for Headers<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(self.as_slice()).finish()
-    }
-}
-
-impl<const N: usize> fmt::Debug for HeaderBuf<'_, N> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let headers: &Headers<'_> = self;
-        fmt::Debug::fmt(headers, f)
-    }
-}
+impl FusedIterator for ValueLines<'_> {}
 
 /// Parses header rows up to and including the empty line that terminates the
 /// head, writing them into `headers` in wire order.
@@ -328,7 +402,7 @@ fn has_unpaired_backslash(prefix: &str) -> bool {
 mod tests {
     use super::*;
     use crate::ErrorKind;
-    use std::vec::Vec;
+    use std::{string::String, vec::Vec};
 
     #[test]
     fn quoted_pair_ascii_and_backslash_parity() {
@@ -431,5 +505,101 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn lines(value: &str) -> Vec<&str> {
+        Header { name: "Subject", value }.value_lines().collect()
+    }
+
+    #[test]
+    fn value_lines_splits_at_folds() {
+        assert_eq!(lines(""), [""]);
+        assert_eq!(lines("lunch"), ["lunch"]);
+        assert_eq!(lines("lunch\r\n soon"), ["lunch", "soon"]);
+        assert_eq!(
+            lines("lunch\r\n \t soon\r\n\tok"),
+            ["lunch", "soon", "ok"]
+        );
+        // Whitespace before a fold belongs to its line.
+        assert_eq!(lines("lunch \r\n soon"), ["lunch ", "soon"]);
+        // A line made only of whitespace is empty once its leading
+        // whitespace is removed.
+        assert_eq!(lines("lunch\r\n \r\n soon"), ["lunch", "", "soon"]);
+        assert_eq!(lines("lunch\r\n "), ["lunch", ""]);
+        // Non-ASCII text is never split.
+        assert_eq!(lines("\u{1f600}\r\n \u{3042}"), ["\u{1f600}", "\u{3042}"]);
+    }
+
+    #[test]
+    fn value_lines_is_fused() {
+        let header = Header { name: "Subject", value: "a\r\n b" };
+        let mut lines = header.value_lines();
+        assert_eq!(lines.next(), Some("a"));
+        assert_eq!(lines.next(), Some("b"));
+        assert_eq!(lines.next(), None);
+        assert_eq!(lines.next(), None);
+    }
+
+    // RFC 3261, Section 7.3.1:
+    //
+    // > The line break and the whitespace at the beginning of the next line
+    // > are treated as a single SP character.
+    //
+    // This applies that sentence literally and checks that joining the lines
+    // with `SP` gives the same result for every short value built from
+    // the pieces below.
+    #[test]
+    #[cfg_attr(miri, ignore = "exhaustive input is too slow under Miri")]
+    fn value_lines_joined_by_sp_matches_rfc_unfolding() {
+        // Deliberately written differently from `ValueLines` so the two do
+        // not share a mistake.
+        fn unfold(value: &str) -> String {
+            let mut unfolded = String::new();
+            let mut chars = value.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\r' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                    unfolded.push(' ');
+                    while matches!(chars.peek(), Some(' ' | '\t')) {
+                        chars.next();
+                    }
+                } else {
+                    unfolded.push(c);
+                }
+            }
+            unfolded
+        }
+
+        // The parser never stores a bare `CR` or a `CRLF` without whitespace
+        // after it, but a `Header` built by hand can hold them.
+        const PIECES: [&str; 7] =
+            ["a", "\u{e9}", " ", "\t", "\r\n ", "\r\n", "\r"];
+        let mut value = String::new();
+        for len in 0..=6u32 {
+            for mut n in 0..PIECES.len().pow(len) {
+                value.clear();
+                for _ in 0..len {
+                    value.push_str(PIECES[n % PIECES.len()]);
+                    n /= PIECES.len();
+                }
+                assert_eq!(
+                    lines(&value).join(" "),
+                    unfold(&value),
+                    "{value:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn value_lines_of_parsed_folded_value() {
+        let input =
+            b"Subject: I know you're there,\r\n  pick up\r\n\tthe phone\r\nX";
+        let value =
+            parse_header_value(&mut Bytes::new(&input[9..])).unwrap().unwrap();
+        assert_eq!(
+            lines(value),
+            ["I know you're there,", "pick up", "the phone"]
+        );
     }
 }
