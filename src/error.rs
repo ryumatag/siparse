@@ -12,7 +12,7 @@ use core::fmt;
 ///
 /// The type is a single byte and copyable. It represents structural parse
 /// failures, not higher-level semantic errors.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Error {
     kind: ErrorKind,
 }
@@ -31,7 +31,7 @@ pub struct Error {
 /// `SIP/2.0 200\n` is a [`StatusCode`](ErrorKind::StatusCode) error, while
 /// `SIP/2.0 200 OK\n` is a `BareLf` error.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ErrorKind {
     /// The `SIP-Version` token is not `SIP/2.0`, compared case-insensitively.
     Version,
