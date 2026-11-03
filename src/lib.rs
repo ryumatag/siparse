@@ -120,7 +120,7 @@ transport and buffer-type dependencies.
 
 # Parsing policy
 
-## Header values
+### Header values
 
 Header values are checked as raw field values without selecting a grammar from
 the header name. The parser accepts `HTAB`, printable ASCII (`0x20..=0x7e`),
@@ -153,7 +153,7 @@ a backslash. No quoting mechanism bypasses this validation.
 
 [RFC 3261 section 25.1]: https://www.rfc-editor.org/rfc/rfc3261#section-25.1
 
-## UTF-8
+### UTF-8
 
 Header values and reason phrases are validated against modern UTF-8
 ([RFC 3629], the same model used by Rust's `str` type) at parse time. This is
