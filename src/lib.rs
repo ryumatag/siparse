@@ -59,9 +59,23 @@ time quadratic in its length. On stream transports, limit the head size. A
 framer can also skip most retries. After a `Partial`, it scans only the newly
 read bytes, plus the last three bytes of the previous read, for the empty line
 `\r\n\r\n`, and parses again only once that appears. A false match only costs
-one extra parse, so the scan does not need to follow the grammar exactly. For
-example, an [RFC 5626] keepalive `\r\n\r\n` before the start-line is harmless,
-because the parser skips leading `CRLF`s and reports `Partial` again.
+one extra parse, so the scan does not need to follow the grammar exactly.
+
+# Keepalives
+
+The parser skips any `CRLF` before the start-line, as [RFC 3261 section 7.5]
+requires for stream transports. It therefore never reports an [RFC 5626]
+keepalive. A double `CRLF` ping on its own returns `Partial`, and a ping in
+front of a message is skipped silently.
+
+On a connection-oriented transport that implements RFC 5626, check for a
+keepalive at each message boundary before parsing a head. A server calls
+[`parse_ping`] and answers each ping with a single `CRLF`. A client calls
+[`parse_pong`] to notice the reply. The two checks are separate because they
+treat a buffer that ends in `CRLF` differently. A server may have half of a
+split ping, while a client must not wait for more bytes.
+
+[RFC 3261 section 7.5]: https://www.rfc-editor.org/rfc/rfc3261#section-7.5
 
 # Keeping parsed data
 
@@ -202,8 +216,8 @@ mod utf8;
 pub use self::{
     error::{Error, ErrorKind},
     parse::{
-        Header, HeaderBuf, Headers, MessageHead, RequestHead, RequestLine,
-        ResponseHead, Status, StatusLine,
+        parse_ping, parse_pong, Header, HeaderBuf, Headers, MessageHead,
+        RequestHead, RequestLine, ResponseHead, Status, StatusLine,
     },
 };
 

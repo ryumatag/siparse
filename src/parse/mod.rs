@@ -3,6 +3,7 @@ SIP head parser.
 */
 
 mod header;
+mod keepalive;
 mod start_line;
 
 use crate::{error::Error, iter::Bytes};
@@ -11,6 +12,7 @@ pub use self::{
     header::{
         parse_header_name, parse_header_value, Header, HeaderBuf, Headers,
     },
+    keepalive::{parse_ping, parse_pong},
     start_line::{
         parse_method, parse_reason_phrase, parse_request_uri,
         parse_status_code, parse_version, RequestLine, StatusLine,
