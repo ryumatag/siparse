@@ -114,6 +114,8 @@ fn match_block(predicate: impl Fn(u8) -> bool, block: ByteBlock) -> usize {
 
 #[inline]
 fn match_header_value_block(block: ByteBlock) -> usize {
+    // Controls and DEL stop even after a backslash. The header value parser
+    // checks that context without adding state to the ASCII scan.
     const TAB: usize = uniform_block(b'\t');
     const DEL: usize = uniform_block(0x7f);
     const ASCII: usize = uniform_block(0x80);

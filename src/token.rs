@@ -87,7 +87,8 @@ pub(crate) fn is_header_name_token(b: u8) -> bool {
 /// Returns whether `b` is accepted as an ASCII octet in a raw SIP header field
 /// value.
 ///
-/// This is the fast-path ASCII predicate used before slower UTF-8 validation.
+/// This is the context-free fast-path ASCII predicate. Escaped controls and
+/// `DEL` stop the scan and are checked separately by the header value parser.
 /// Non-ASCII octets must be validated separately as complete modern UTF-8
 /// sequences.
 ///
@@ -103,6 +104,11 @@ pub(crate) fn is_header_name_token(b: u8) -> bool {
 /// > UTF8-CONT      =  %x80-BF
 /// > header-value   =  *(TEXT-UTF8char / UTF8-CONT / LWS)
 /// > ```
+///
+/// This generic extension-header production does not include the controls
+/// permitted by `quoted-pair` in known headers. The parser accepts those
+/// separately without validating header-specific quoted-string or comment
+/// syntax. See the crate's header value policy.
 #[inline]
 pub(crate) fn is_header_value_ascii(b: u8) -> bool {
     HEADER_VALUE_ASCII_MAP[b as usize]

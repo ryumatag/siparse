@@ -25,6 +25,11 @@ pub struct Header<'buf> {
     ///
     /// A folded value keeps its interior `CRLF` and leading whitespace
     /// verbatim. Unfolding is left to the consumer.
+    ///
+    /// The value is modern UTF-8 and may contain ASCII controls or `DEL`
+    /// after an unpaired backslash. Header-specific quoted-string and
+    /// comment syntax is left to the consumer. See the crate's
+    /// [header value policy](crate#header-value-policy).
     pub value: &'buf str,
 }
 
@@ -247,7 +252,8 @@ pub fn parse_header_value<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
                     }
                     _ => {
                         // SAFETY: Every consumed byte is an ASCII
-                        // `is_header_value_ascii` byte, part of a folding
+                        // `is_header_value_ascii` byte, an escaped ASCII
+                        // control or `DEL`, part of a folding
                         // `CRLF` plus `SP` / `HTAB`, or part of a sequence
                         // accepted by `parse_utf8_run`. Trimming the
                         // terminating ASCII `CRLF` cannot split a sequence.
@@ -272,7 +278,138 @@ pub fn parse_header_value<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
                 )
             }
             b'\n' => return Err(Error::bare_lf()),
+            0x00..=0x08 | 0x0b..=0x0c | 0x0e..=0x1f | 0x7f => {
+                // SAFETY: The prefix has already passed the ASCII, folding and
+                // modern UTF-8 checks above. Earlier escaped controls are
+                // ASCII too. The current byte is not included.
+                let prefix = unsafe { mark.exit_str(bytes) };
+                if !has_unpaired_backslash(prefix) {
+                    return Err(Error::header_value());
+                }
+                // SAFETY: `peek!` just returned the control byte.
+                unsafe { bytes.advance(1) };
+            }
             _ => return Err(Error::header_value()),
+        }
+    }
+}
+
+// Only exceptional controls need this check. Keeping backslashes in the
+// ordinary ASCII scan avoids tracking quote or comment state on the hot path.
+// The consumer validates where quoted-pair is allowed by the field's grammar.
+// Each backward scan covers a distinct run, so total work is linear.
+#[cold]
+fn has_unpaired_backslash(prefix: &str) -> bool {
+    prefix.as_bytes().iter().rev().take_while(|&&b| b == b'\\').count() % 2
+        == 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ErrorKind;
+    use std::vec::Vec;
+
+    #[test]
+    fn quoted_pair_ascii_and_backslash_parity() {
+        // A pair consumes its backslash. An even run therefore leaves the
+        // following control unescaped, including inside a quoted string.
+        for byte in 0..=0x7f {
+            if matches!(byte, b'\r' | b'\n') {
+                continue;
+            }
+            for slashes in 0..=7 {
+                let mut input = Vec::from(&b"\"A"[..]);
+                input.extend(core::iter::repeat(b'\\').take(slashes));
+                input.push(byte);
+                input.extend_from_slice(b"B\"\r\nX");
+                let mut bytes = Bytes::new(&input);
+                let result = parse_header_value(&mut bytes);
+                if matches!(byte, b'\t' | b' '..=b'~') || slashes % 2 == 1 {
+                    let value = result.unwrap().unwrap();
+                    assert_eq!(value.as_bytes(), &input[..input.len() - 3]);
+                    assert_eq!(bytes.remaining(), b"X");
+                } else {
+                    assert_eq!(
+                        result.unwrap_err().kind(),
+                        ErrorKind::HeaderValue
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn backslash_does_not_escape_line_structure() {
+        for prefix in [b"A".as_slice(), b"A\\", b"A\\\\"] {
+            for (ending, expected) in [
+                (b"\rX".as_slice(), ErrorKind::BareCr),
+                (b"\nX".as_slice(), ErrorKind::BareLf),
+            ] {
+                let mut input = Vec::from(prefix);
+                input.extend_from_slice(ending);
+                let err =
+                    parse_header_value(&mut Bytes::new(&input)).unwrap_err();
+                assert_eq!(err.kind(), expected);
+            }
+            for ending in [b"\r\nX".as_slice(), b"\r\n\tB\r\nX"] {
+                let mut input = Vec::from(prefix);
+                input.extend_from_slice(ending);
+                let mut bytes = Bytes::new(&input);
+                let value = parse_header_value(&mut bytes).unwrap().unwrap();
+                assert_eq!(value.as_bytes(), &input[..input.len() - 3]);
+                assert_eq!(bytes.remaining(), b"X");
+            }
+        }
+    }
+
+    #[test]
+    fn quoted_pair_does_not_bypass_utf8_validation() {
+        for invalid in [
+            b"\x80".as_slice(),
+            b"\xc0\x80",
+            b"\xed\xa0\x80",
+            b"\xf4\x90\x80\x80",
+            b"\xf8\x88\x80\x80\x80",
+            b"\xff",
+        ] {
+            for prefix in [b"A\\".as_slice(), b"A\\\x00"] {
+                let mut input = Vec::from(prefix);
+                input.extend_from_slice(invalid);
+                input.extend_from_slice(b"\r\nX");
+                let err =
+                    parse_header_value(&mut Bytes::new(&input)).unwrap_err();
+                assert_eq!(err.kind(), ErrorKind::HeaderValue);
+            }
+        }
+    }
+
+    #[test]
+    fn quoted_pair_at_word_boundaries_and_unaligned_inputs() {
+        let word = core::mem::size_of::<usize>();
+        for offset in 0..word {
+            for padding in 0..=word * 2 {
+                for slashes in [1, 2, 3, word + 1, word * 2] {
+                    let mut input = std::vec![0xff; offset];
+                    input.extend(core::iter::repeat(b'a').take(padding));
+                    input.extend(core::iter::repeat(b'\\').take(slashes));
+                    input.extend_from_slice(b"\x08\r\nX");
+                    let mut bytes = Bytes::new(&input[offset..]);
+                    let result = parse_header_value(&mut bytes);
+                    if slashes % 2 == 1 {
+                        assert_eq!(
+                            result.unwrap().unwrap().as_bytes(),
+                            &input[offset..input.len() - 3]
+                        );
+                        assert_eq!(bytes.remaining(), b"X");
+                    } else {
+                        assert_eq!(
+                            result.unwrap_err().kind(),
+                            ErrorKind::HeaderValue
+                        );
+                    }
+                }
+            }
         }
     }
 }

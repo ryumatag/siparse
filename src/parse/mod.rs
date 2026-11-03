@@ -1171,6 +1171,86 @@ mod tests {
     }
 
     #[test]
+    fn quoted_pair_controls_in_request_and_response_headers() {
+        macro_rules! check {
+            ($head_ty:ident, $start:expr) => {
+                // From uses quoted-string. Retry-After allows a nested
+                // comment. Extension fields exercise the deliberately
+                // broader raw-value policy, including unbalanced quotes.
+                for (name, before, after) in [
+                    (
+                        "From",
+                        b"\"A".as_slice(),
+                        b"B\" <sip:a@b>;tag=x".as_slice(),
+                    ),
+                    ("Retry-After", b"120 (outer (A", b"B))"),
+                    ("X-Extension", b"A", b"B"),
+                    ("X-Extension", b"\"A", b"B"),
+                ] {
+                    for byte in (0x00..=0x08)
+                        .chain(0x0b..=0x0c)
+                        .chain(0x0e..=0x1f)
+                        .chain(core::iter::once(0x7f))
+                    {
+                        let mut buf = std::vec::Vec::from($start.as_slice());
+                        buf.extend_from_slice(name.as_bytes());
+                        buf.extend_from_slice(b": ");
+                        let value_start = buf.len();
+                        buf.extend_from_slice(before);
+                        buf.extend_from_slice(&[b'\\', byte]);
+                        buf.extend_from_slice(after);
+                        let value_end = buf.len();
+                        buf.extend_from_slice(b"\r\n\r\nbody");
+                        let mut headers = HeaderBuf::<1>::new();
+                        let mut head = $head_ty::new(&mut headers);
+                        assert_eq!(
+                            head.parse(&buf),
+                            Ok(Status::Complete(buf.len() - 4))
+                        );
+                        assert_eq!(head.headers.len(), 1);
+                        assert_eq!(head.headers[0].name, name);
+                        let value = head.headers[0].value;
+                        assert_eq!(
+                            value.as_bytes(),
+                            &buf[value_start..value_end]
+                        );
+                        assert_eq!(
+                            value.as_ptr(),
+                            buf[value_start..].as_ptr()
+                        );
+                    }
+                }
+            };
+        }
+        check!(RequestHead, b"INVITE sip:b@host SIP/2.0\r\n");
+        check!(ResponseHead, b"SIP/2.0 200 OK\r\n");
+    }
+
+    #[test]
+    fn quoted_pair_utf8_and_fold_for_every_prefix() {
+        macro_rules! check {
+            ($head_ty:ident, $start:expr) => {
+                let mut buf = std::vec::Vec::from($start.as_slice());
+                let value = "\"田\\\u{0}中\\\u{8}\\\\\\\u{7f}\r\n \t📞\" <sip:a@b>;tag=x";
+                buf.extend_from_slice(b"From: ");
+                buf.extend_from_slice(value.as_bytes());
+                buf.extend_from_slice(b"\r\n\r\n");
+                for end in 0..buf.len() {
+                    let mut headers = HeaderBuf::<1>::new();
+                    let mut head = $head_ty::new(&mut headers);
+                    assert_eq!(head.parse(&buf[..end]), Ok(Status::Partial), "end={end}");
+                }
+                let mut headers = HeaderBuf::<1>::new();
+                let mut head = $head_ty::new(&mut headers);
+                assert_eq!(head.parse(&buf), Ok(Status::Complete(buf.len())));
+                assert_eq!(head.headers[0].value, value);
+            };
+        }
+        check!(RequestHead, b"INVITE sip:b@host SIP/2.0\r\n");
+        check!(ResponseHead, b"SIP/2.0 200 OK\r\n");
+    }
+
+    #[test]
     fn exposes_rows_parsed_before_partial() {
         let mut headers = HeaderBuf::<N_HEADERS>::new();
         let mut head = RequestHead::new(&mut headers);

@@ -48,7 +48,12 @@ pub enum ErrorKind {
     /// The header name is empty or contains a byte outside the RFC 3261
     /// `token` set.
     HeaderName,
-    /// The header value contains a disallowed byte or invalid UTF-8.
+    /// The header value contains an unescaped ASCII control other than `HTAB`,
+    /// unescaped `DEL`, or invalid modern UTF-8. `CR` and `LF` follow the line
+    /// structure rules and cannot be escaped by a backslash.
+    ///
+    /// Header-specific quoted-string and comment syntax is not validated.
+    /// See the crate's [header value policy](crate#header-value-policy).
     HeaderValue,
     /// A header name is not followed by `:`. This covers a row that ends right
     /// after the name and whitespace inside the name, as in
