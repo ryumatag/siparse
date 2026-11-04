@@ -15,25 +15,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  clippy:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-          components: clippy
-      - name: Run clippy on the benchmark crate
-        working-directory: bench
-        run: cargo clippy --all-targets -- -D warnings
-
   # Compares the head benchmarks against the commit this change builds on.
   # Shared runners are noisy, so the result is informational and never
-  # fails the job.
+  # fails the job. Clippy and the benchmark assertions run in `ci`.
   compare:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       # The public head benchmarks are the ones used for decisions. Running
       # the whole suite twice would take far longer.
@@ -74,9 +61,19 @@ jobs:
         if: steps.base.outputs.ran == 'true'
         working-directory: bench
         # `-t 5` alone prints nothing useful when no benchmark moved by 5%
-        # or more, so print the full table first.
+        # or more, so print the full table first. The summary shows the
+        # same tables on the run page.
         run: |
-          critcmp base head
-          echo
-          echo "Changes of 5% or more:"
-          critcmp -t 5 base head || true
+          {
+            echo "## Benchmarks against $BASE_SHA"
+            echo
+            echo '```'
+            critcmp base head
+            echo '```'
+            echo
+            echo "Changes of 5% or more:"
+            echo
+            echo '```'
+            critcmp -t 5 base head || true
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

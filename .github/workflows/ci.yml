@@ -44,14 +44,14 @@ jobs:
   test-bench:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v7
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: stable
-    - name: Run benchmark tests
-      run: cargo bench --manifest-path bench/Cargo.toml -- --test
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Run benchmark tests
+        run: cargo bench --manifest-path bench/Cargo.toml -- --test
 
   test-fuzz:
     runs-on: ubuntu-latest
@@ -84,6 +84,7 @@ jobs:
       - name: Check formatting
         run: |
           cargo fmt -- --check
+          cargo fmt --manifest-path bench/Cargo.toml -- --check
           cargo fmt --manifest-path fuzz/Cargo.toml -- --check
 
   clippy:
@@ -99,6 +100,7 @@ jobs:
       - name: Run clippy
         run: |
           cargo clippy --all-targets -- -D warnings
+          cargo clippy --manifest-path bench/Cargo.toml --all-targets -- -D warnings
           cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
 
   msrv:
