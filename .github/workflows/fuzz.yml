@@ -24,7 +24,7 @@ jobs:
         with:
           toolchain: nightly
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked --version 0.13.1
+        run: cargo install cargo-fuzz --locked --version 0.13.2
       - name: Fuzz public API with AddressSanitizer
         env:
           FUZZ_TARGET: ${{ matrix.target }}
