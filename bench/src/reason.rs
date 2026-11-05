@@ -1,11 +1,9 @@
 use std::hint::black_box as bb;
 
 use criterion::Criterion;
+use siparse::bench::{parse_reason_phrase, Bytes};
 
-use crate::{
-    benchmark,
-    private::{parse_reason_phrase, Bytes},
-};
+use crate::benchmark;
 
 pub(super) fn parse(c: &mut Criterion) {
     fixed_shape(c);

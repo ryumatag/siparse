@@ -199,6 +199,9 @@ validation pass.
 
 * **std** (enabled by default) - Implements `std::error::Error` for [`Error`].
   Without it, `siparse` is `no_std` and does not use `alloc`.
+
+A `__bench` feature exists for the benchmark crate in this repository. It is
+unstable and not part of the public API.
 */
 
 #![no_std]
@@ -239,16 +242,67 @@ pub use self::{
     },
 };
 
-// For benchmarking by the `siparse-bench` crate. Not part of the public API.
+/// Entry points for the `siparse-bench` crate, behind the `__bench` feature.
+///
+/// Each function parses one production directly, so the benchmarks can locate
+/// a cost inside the head parser. Nothing here is part of the public API, and
+/// the feature can change or go away in any release.
+#[cfg(feature = "__bench")]
 #[doc(hidden)]
-pub mod _private {
+pub mod bench {
     #[doc(hidden)]
-    pub use super::{
-        iter::Bytes,
-        parse::{
-            parse_header_name, parse_header_value, parse_method,
-            parse_reason_phrase, parse_request_uri, parse_status_code,
-            parse_version,
-        },
-    };
+    pub use crate::iter::Bytes;
+    use crate::parse::{self, Delimited, Result};
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn parse_method<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
+        parse::method::<Delimited>(bytes)
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn parse_request_uri<'buf>(
+        bytes: &mut Bytes<'buf>,
+    ) -> Result<&'buf str> {
+        parse::request_uri::<Delimited>(bytes)
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn parse_version<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
+        parse::parse_version(bytes)
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn parse_status_code<'buf>(
+        bytes: &mut Bytes<'buf>,
+    ) -> Result<&'buf str> {
+        parse::parse_status_code(bytes)
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn parse_reason_phrase<'buf>(
+        bytes: &mut Bytes<'buf>,
+    ) -> Result<&'buf str> {
+        parse::reason_phrase::<Delimited>(bytes)
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn parse_header_name<'buf>(
+        bytes: &mut Bytes<'buf>,
+    ) -> Result<&'buf str> {
+        parse::parse_header_name(bytes)
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn parse_header_value<'buf>(
+        bytes: &mut Bytes<'buf>,
+    ) -> Result<&'buf str> {
+        parse::parse_header_value(bytes)
+    }
 }

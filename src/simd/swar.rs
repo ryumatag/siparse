@@ -13,17 +13,16 @@ type ByteBlock = [u8; BLOCK_SIZE];
 const HI: usize = uniform_block(0x80);
 const LO7: usize = uniform_block(0x7f);
 
-// The `match_*_vectored` scans are `#[inline(always)]`. Each production has
-// a copy for the head parser and one for `crate::check`, so a scan used by
-// both has two callers. With a plain `#[inline]`, LLVM then kept the scan
-// out of line in a binary that used both, and whole-head parsing got up to
-// 28% slower in the benchmarks. Forcing the scans inline brought it back
-// within noise.
+// The `match_*_vectored` scans are `#[inline(always)]`. Each production has a
+// copy for the head parser and one for `crate::check`, so a scan used by both
+// has two callers. With a plain `#[inline]`, LLVM then kept the scan out of
+// line in a binary that used both, and whole-head parsing got up to 28% slower
+// in the benchmarks. Forcing the scans inline brought it back within noise.
 
 // The URI scan checks each byte against the lookup table instead of using a
 // bitwise block predicate. Rejecting the ten visible ASCII bytes outside the
-// URI token set takes ten `eq_byte` tests per block, which measured up to
-// 47% slower than eight table lookups on short URIs.
+// URI token set takes ten `eq_byte` tests per block, which measured up to 47%
+// slower than eight table lookups on short URIs.
 #[inline(always)]
 pub(crate) fn match_uri_vectored(bytes: &mut Bytes<'_>) {
     while let Some(block) = bytes.peek_n::<BLOCK_SIZE>() {
@@ -96,13 +95,13 @@ pub(crate) fn match_reason_phrase_ascii_vectored(bytes: &mut Bytes<'_>) {
     unsafe { bytes.advance(n) };
 }
 
-/// Advances `bytes` to the first `\r\n\r\n` at or after the cursor and
-/// returns `true`. Without one, it returns `false` and leaves the cursor
-/// somewhere in the last three bytes, where a later match could still start.
+/// Advances `bytes` to the first `\r\n\r\n` at or after the cursor and returns
+/// `true`. Without one, it returns `false` and leaves the cursor somewhere in
+/// the last three bytes, where a later match could still start.
 ///
 /// The scan looks for `CR` one block at a time and checks the three bytes
-/// after each one. A head has one `CR` per row, so the check runs once per
-/// row and the block scan does the rest of the work.
+/// after each one. A head has one `CR` per row, so the check runs once per row
+/// and the block scan does the rest of the work.
 #[inline]
 pub(crate) fn find_head_end_vectored(bytes: &mut Bytes<'_>) -> bool {
     const CR: usize = uniform_block(b'\r');
@@ -229,13 +228,13 @@ fn match_reason_phrase_ascii_block(block: ByteBlock) -> usize {
 // The lane predicates below are exact per byte. The classic tricks, such as
 // `(x - 0x01..) & !x` for a zero byte, let a borrow leak out of a matching
 // byte into its neighbor. Callers that only take the first set lane can
-// usually live with that, because the leak only follows a real hit. The
-// block matchers cannot, because they clear `TAB` lanes out of `lt_sp`.
-// With the leaky forms, a `TAB` followed by `SP` rejected the `SP`, and a
-// `TAB` followed by `BS` accepted the `BS`.
+// usually live with that, because the leak only follows a real hit. The block
+// matchers cannot, because they clear `TAB` lanes out of `lt_sp`. With the
+// leaky forms, a `TAB` followed by `SP` rejected the `SP`, and a `TAB`
+// followed by `BS` accepted the `BS`.
 //
-// Each predicate instead adds into the low 7 bits of every byte, where the
-// sum stays below `0x100` and never carries into the next lane.
+// Each predicate instead adds into the low 7 bits of every byte, where the sum
+// stays below `0x100` and never carries into the next lane.
 
 /// Sets the high bit of every byte of `x` that equals the matching byte of
 /// `needle`, and clears all other bits.
@@ -291,9 +290,9 @@ mod tests {
     /// Checks every byte pair at every offset against the scalar predicate.
     ///
     /// Uniform blocks cannot catch a lane predicate that leaks into its
-    /// neighbor, such as a `TAB` that changes how the next byte is
-    /// classified. Placing two arbitrary bytes side by side can. The last
-    /// offset straddles the block boundary.
+    /// neighbor, such as a `TAB` that changes how the next byte is classified.
+    /// Placing two arbitrary bytes side by side can. The last offset straddles
+    /// the block boundary.
     fn assert_byte_pairs_match_scalar(
         vectored: fn(&mut Bytes<'_>),
         predicate: fn(u8) -> bool,

@@ -1,5 +1,4 @@
 use criterion::{Bencher, Criterion, Throughput};
-use siparse::_private as private;
 
 mod any;
 mod check;
@@ -37,7 +36,8 @@ criterion::criterion_group! {
         check::check,
         // Public search for the end of a head, next to two yardsticks.
         head_end::find,
-        // Private API. These call one production directly, so the compiler
+        // Crate internals behind the `__bench` feature. These call one
+        // production directly, so the compiler
         // inlines it into the benchmark loop instead of into `parse_head`,
         // and the generated code differs from what the public API runs.
         // Many finish in a few nanoseconds, where code placement alone moves

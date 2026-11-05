@@ -16,7 +16,7 @@ path = "src/bench.rs"
 
 [dependencies]
 criterion = { version = "0.8.2", default-features = false }
-siparse = { path = ".." }
+siparse = { path = "..", features = ["__bench"] }
 rand = "0.10.3"
 memchr = "2.8.3"
 

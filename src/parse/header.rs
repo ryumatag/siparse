@@ -275,9 +275,10 @@ fn parse_header<'buf>(buf: &mut Bytes<'buf>) -> Result<Option<Header<'buf>>> {
     Ok(Status::Complete(Some(Header { name, value })))
 }
 
-#[allow(missing_docs)]
 #[inline]
-pub fn parse_header_name<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
+pub(crate) fn parse_header_name<'buf>(
+    bytes: &mut Bytes<'buf>,
+) -> Result<&'buf str> {
     header_name::<Delimited>(bytes)
 }
 
@@ -325,9 +326,10 @@ pub(crate) fn header_name<'buf, B: Boundary>(
     }
 }
 
-#[allow(missing_docs)]
 #[inline]
-pub fn parse_header_value<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
+pub(crate) fn parse_header_value<'buf>(
+    bytes: &mut Bytes<'buf>,
+) -> Result<&'buf str> {
     header_value::<Delimited>(bytes)
 }
 
