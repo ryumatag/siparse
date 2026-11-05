@@ -26,3 +26,10 @@ path = "fuzz_targets/response_head.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "find_head_end"
+path = "fuzz_targets/find_head_end.rs"
+test = false
+doc = false
+bench = false

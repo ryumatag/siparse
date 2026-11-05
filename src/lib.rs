@@ -60,10 +60,9 @@ the buffer grows between parses, create them again for each parse.
 
 Because every retry starts over, a head that arrives in many small reads costs
 time quadratic in its length. On stream transports, limit the head size. A
-framer can also skip most retries. After a `Partial`, it scans only the newly
-read bytes, plus the last three bytes of the previous read, for the empty line
-`\r\n\r\n`, and parses again only once that appears. A false match only costs
-one extra parse, so the scan does not need to follow the grammar exactly.
+framer can also skip most retries with [`find_head_end`]. After a `Partial`,
+it scans only the newly read bytes, plus the last three bytes of the previous
+read, for the empty line `\r\n\r\n`, and parses again only once that appears.
 
 # Keepalives
 
@@ -234,9 +233,9 @@ mod utf8;
 pub use self::{
     error::{Error, ErrorKind},
     parse::{
-        parse_ping, parse_pong, AnyHead, Header, HeaderBuf, Headers,
-        MessageHead, RequestHead, RequestLine, ResponseHead, StartLine,
-        Status, StatusLine, ValueLines,
+        find_head_end, parse_ping, parse_pong, AnyHead, Header, HeaderBuf,
+        Headers, MessageHead, RequestHead, RequestLine, ResponseHead,
+        StartLine, Status, StatusLine, ValueLines,
     },
 };
 

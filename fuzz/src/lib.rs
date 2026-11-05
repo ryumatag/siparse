@@ -13,6 +13,17 @@ cargo +nightly fuzz run response_head \
     -max_total_time=30 -max_len=4096
 ```
 
+The `find_head_end` target compares [`siparse::find_head_end`] against a
+one-window-at-a-time search at every `scanned`, and checks that it finds
+the end the parser returns:
+
+```text
+mkdir -p tmp/fuzz-find-head-end
+cargo +nightly fuzz run find_head_end \
+    tmp/fuzz-find-head-end fuzz/corpus/request_head -- \
+    -max_total_time=30 -max_len=4096
+```
+
 The harness checks borrowed ranges and initialized rows on every outcome,
 including errors. It compares parsing results across header buffer capacities,
 including zero, exact-fit, and insufficient capacities, using a 16-slot parse
@@ -230,6 +241,47 @@ harness!(
     b"OPTIONS sip:a@b SIP/2.0\r\nX: prime\r\n\r\n"
 );
 
+/// Checks `find_head_end` against a scalar search at every `scanned`.
+///
+/// The parser is the second oracle. The search from `0` must land on the
+/// end the parser returns, unless it stops at the `CRLF`s that the parser
+/// skips before the start-line. A `Partial` head has no other end.
+pub fn find_head_end(input: &[u8]) {
+    const HEAD_END: &[u8] = b"\r\n\r\n";
+
+    let scalar = |scanned: usize| {
+        let start = scanned.saturating_sub(HEAD_END.len() - 1);
+        input[start..]
+            .windows(HEAD_END.len())
+            .position(|window| window == HEAD_END)
+            .map(|i| start + i + HEAD_END.len())
+    };
+
+    for scanned in 0..=input.len() {
+        assert_eq!(
+            siparse::find_head_end(input, scanned),
+            scalar(scanned),
+            "scanned={scanned}"
+        );
+    }
+
+    let found = siparse::find_head_end(input, 0);
+    let in_leading_crlfs =
+        |end: usize| input[..end].chunks(2).all(|pair| pair == b"\r\n");
+    match parse_request::<16>(input).result {
+        Ok(Status::Complete(end)) => {
+            let found = found.expect("a complete head has an end");
+            assert!(found == end || in_leading_crlfs(found), "end={found}");
+        }
+        Ok(Status::Partial) => {
+            if let Some(found) = found {
+                assert!(in_leading_crlfs(found), "end={found}");
+            }
+        }
+        Err(_) => {}
+    }
+}
+
 harness!(
     response,
     parse_response,
@@ -367,6 +419,16 @@ mod tests {
         }
     };
 }
+
+    #[test]
+    fn find_head_end_seeds() {
+        for seed in seeds!("request_head";) {
+            find_head_end(seed.input);
+        }
+        find_head_end(b"");
+        find_head_end(b"\r\n\r\n");
+        find_head_end(b"\r\n\r\n\r\nINVITE sip:a@b SIP/2.0\r\n");
+    }
 
     #[test]
     fn request_seeds_and_every_complete_head_prefix() {

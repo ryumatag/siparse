@@ -2,6 +2,7 @@
 SIP head parser.
 */
 
+mod head_end;
 mod header;
 mod keepalive;
 mod start_line;
@@ -14,6 +15,7 @@ pub(crate) use self::{
 };
 
 pub use self::{
+    head_end::find_head_end,
     header::{
         parse_header_name, parse_header_value, Header, HeaderBuf, Headers,
         ValueLines,

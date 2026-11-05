@@ -96,6 +96,55 @@ pub(crate) fn match_reason_phrase_ascii_vectored(bytes: &mut Bytes<'_>) {
     unsafe { bytes.advance(n) };
 }
 
+/// Advances `bytes` to the first `\r\n\r\n` at or after the cursor and
+/// returns `true`. Without one, it returns `false` and leaves the cursor
+/// somewhere in the last three bytes, where a later match could still start.
+///
+/// The scan looks for `CR` one block at a time and checks the three bytes
+/// after each one. A head has one `CR` per row, so the check runs once per
+/// row and the block scan does the rest of the work.
+#[inline]
+pub(crate) fn find_head_end_vectored(bytes: &mut Bytes<'_>) -> bool {
+    const CR: usize = uniform_block(b'\r');
+
+    while let Some(block) = bytes.peek_n::<BLOCK_SIZE>() {
+        let n = offsetnz(eq_byte(usize::from_ne_bytes(block), CR));
+
+        // SAFETY: `n <= BLOCK_SIZE`, and `peek_n` saw a full block.
+        unsafe { bytes.advance(n) };
+
+        if n == BLOCK_SIZE {
+            continue;
+        }
+
+        if is_head_end(bytes) {
+            return true;
+        }
+
+        // SAFETY: The `CR` found above is at the cursor.
+        unsafe { bytes.advance(1) };
+    }
+
+    // Fewer than `BLOCK_SIZE` bytes remain.
+    while bytes.len() >= HEAD_END.len() {
+        if is_head_end(bytes) {
+            return true;
+        }
+
+        // SAFETY: At least `HEAD_END.len()` bytes remain.
+        unsafe { bytes.advance(1) };
+    }
+
+    false
+}
+
+const HEAD_END: [u8; 4] = *b"\r\n\r\n";
+
+#[inline]
+fn is_head_end(bytes: &Bytes<'_>) -> bool {
+    bytes.peek_n::<{ HEAD_END.len() }>() == Some(HEAD_END)
+}
+
 #[cold]
 #[inline]
 fn match_tail(predicate: impl Fn(u8) -> bool, bytes: &[u8]) -> usize {

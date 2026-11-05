@@ -4,6 +4,7 @@ use siparse::_private as private;
 mod any;
 mod check;
 mod corpus;
+mod head_end;
 mod header_name;
 mod header_value;
 mod method;
@@ -34,6 +35,8 @@ criterion::criterion_group! {
         // Public checks of single elements. The plain forms share the head
         // parser's productions, and the `const` forms are scalar.
         check::check,
+        // Public search for the end of a head, next to two yardsticks.
+        head_end::find,
         // Private API. These call one production directly, so the compiler
         // inlines it into the benchmark loop instead of into `parse_head`,
         // and the generated code differs from what the public API runs.
