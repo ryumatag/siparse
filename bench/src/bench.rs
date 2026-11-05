@@ -10,6 +10,7 @@ mod method;
 mod reason;
 mod request;
 mod response;
+mod scan;
 mod status;
 mod uri;
 mod version;
@@ -36,6 +37,8 @@ criterion::criterion_group! {
         check::check,
         // Public search for the end of a head, next to two yardsticks.
         head_end::find,
+        // Public scans for the elements inside a header value.
+        scan::scan,
         // Crate internals behind the `__bench` feature. These call one
         // production directly, so the compiler
         // inlines it into the benchmark loop instead of into `parse_head`,

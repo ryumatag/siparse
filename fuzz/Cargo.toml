@@ -33,3 +33,10 @@ path = "fuzz_targets/find_head_end.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "scan"
+path = "fuzz_targets/scan.rs"
+test = false
+doc = false
+bench = false
