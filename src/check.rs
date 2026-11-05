@@ -21,6 +21,9 @@ Each check comes in two forms:
   is slower at run time. It accepts the same bytes and reports the same
   [`ErrorKind`](crate::ErrorKind) as the plain one.
 
+An `_error_offset` function, such as [`header_value_error_offset`], also
+says where a check fails. See [error offsets](#error-offsets).
+
 ```
 use siparse::{check, ErrorKind};
 
@@ -38,27 +41,38 @@ assert_eq!(CONTENT_TYPE, "application/sdp");
 # Ok::<(), siparse::Error>(())
 ```
 
+# Error offsets
+
+[`Error`] does not say where a check failed, which keeps it small for the
+head parser. When the place matters, such as in an error message, call
+`*_error_offset` after a check fails. It scans `src` again one byte at a
+time, so a successful check costs nothing extra.
+
+The offset points at the first byte that the check does not accept:
+
+* a byte outside the element's set, such as a control in a header value
+  that no backslash escapes;
+* a bare `CR` or `LF`;
+* the byte after a `CRLF` that does not start a fold;
+* a `%`-escape digit that is not hexadecimal;
+* the byte of a UTF-8 sequence that does not fit it.
+
+It is `src.len()` if `src` ends too early, such as an empty method or a
+cut-off `%`-escape, UTF-8 sequence, or fold.
+
+```
+use siparse::check;
+
+let src = b"\"Alice\" <sip:alice@atlanta.example.com>\x01";
+assert!(check::header_value(src).is_err());
+assert_eq!(check::header_value_error_offset(src), Some(src.len() - 1));
+```
+
 The status code and the version have no checks here. They are fixed
 three-digit and literal tokens that a consumer usually narrows further.
 */
 
 use core::str;
-
-// Returns `true` if `src` is not empty and every byte passes `predicate`.
-// A macro rather than a function, because a `const fn` cannot call a
-// function pointer on stable Rust.
-macro_rules! all_bytes {
-    ($src:expr, $predicate:path) => {{
-        let src: &[u8] = $src;
-        let mut ok = !src.is_empty();
-        let mut i = 0;
-        while ok && i < src.len() {
-            ok = $predicate(src[i]);
-            i += 1;
-        }
-        ok
-    }};
-}
 
 use crate::{
     error::Error,
@@ -162,95 +176,82 @@ fn whole<'a>(
     }
 }
 
-/// Checks that `src` is a SIP method, in a `const` context.
-///
-/// This is the `const` form of [`method`].
-///
-/// # Errors
-///
-/// The same as [`method`].
-pub const fn method_const(src: &[u8]) -> Result<&str, Error> {
-    if !all_bytes!(src, is_method_token) {
-        return Err(Error::method());
-    }
-    // SAFETY: `is_method_token` only accepts ASCII.
-    Ok(unsafe { str::from_utf8_unchecked(src) })
+// The `const` forms and the error offsets.
+//
+// Each element has one scalar scan that finds the first fault, as the error
+// and the offset of the byte the check does not accept. `*_const` keeps the
+// error and `*_error_offset` keeps the offset, so the two always agree.
+
+/// An error and where it was found. See the module docs for the offsets.
+type Fault = (Error, usize);
+
+// Scans a `token`-like element whose bytes all come from one set. A macro
+// rather than a function, because a `const fn` cannot call a function
+// pointer on stable Rust.
+macro_rules! token_fault {
+    ($src:expr, $predicate:path, $error:expr) => {{
+        let src: &[u8] = $src;
+        let mut fault = None;
+        if src.is_empty() {
+            fault = Some(($error, 0));
+        }
+        let mut i = 0;
+        while fault.is_none() && i < src.len() {
+            if !$predicate(src[i]) {
+                fault = Some(($error, i));
+            }
+            i += 1;
+        }
+        fault
+    }};
 }
 
-/// Checks that `src` is a Request-URI, in a `const` context.
-///
-/// This is the `const` form of [`request_uri`].
-///
-/// # Errors
-///
-/// The same as [`request_uri`].
-pub const fn request_uri_const(src: &[u8]) -> Result<&str, Error> {
-    if !all_bytes!(src, is_uri_token) {
-        return Err(Error::request_uri());
-    }
-    // SAFETY: `is_uri_token` rejects raw non-ASCII.
-    Ok(unsafe { str::from_utf8_unchecked(src) })
+const fn method_fault(src: &[u8]) -> Option<Fault> {
+    token_fault!(src, is_method_token, Error::method())
 }
 
-/// Checks that `src` is a reason phrase, in a `const` context.
-///
-/// This is the `const` form of [`reason_phrase`].
-///
-/// # Errors
-///
-/// The same as [`reason_phrase`].
-pub const fn reason_phrase_const(src: &[u8]) -> Result<&str, Error> {
+const fn request_uri_fault(src: &[u8]) -> Option<Fault> {
+    token_fault!(src, is_uri_token, Error::request_uri())
+}
+
+const fn header_name_fault(src: &[u8]) -> Option<Fault> {
+    token_fault!(src, is_header_name_token, Error::header_name())
+}
+
+const fn reason_phrase_fault(src: &[u8]) -> Option<Fault> {
+    let error = Error::reason_phrase();
     let mut i = 0;
     while i < src.len() {
         let b = src[i];
         if is_reason_phrase_octet(b) {
             i += 1;
         } else if b == b'%' {
-            if i + 2 >= src.len()
-                || !src[i + 1].is_ascii_hexdigit()
-                || !src[i + 2].is_ascii_hexdigit()
-            {
-                return Err(Error::reason_phrase());
+            // `%` HEXDIG HEXDIG. Point at the first digit that is wrong or
+            // missing.
+            let mut j = i + 1;
+            while j < i + 3 {
+                if j >= src.len() {
+                    return Some((error, src.len()));
+                }
+                if !src[j].is_ascii_hexdigit() {
+                    return Some((error, j));
+                }
+                j += 1;
             }
             i += 3;
         } else if b >= 0x80 {
-            match utf8_char_len(src, i) {
-                Some(len) => i += len,
-                None => return Err(Error::reason_phrase()),
+            match utf8_char(src, i) {
+                Ok(len) => i += len,
+                Err(at) => return Some((error, at)),
             }
         } else {
-            return Err(Error::reason_phrase());
+            return Some((error, i));
         }
     }
-    // SAFETY: Every byte is ASCII, part of an ASCII `%`-escape, or part of a
-    // sequence that `utf8_char_len` accepted.
-    Ok(unsafe { str::from_utf8_unchecked(src) })
+    None
 }
 
-/// Checks that `src` is a header field name, in a `const` context.
-///
-/// This is the `const` form of [`header_name`].
-///
-/// # Errors
-///
-/// The same as [`header_name`].
-pub const fn header_name_const(src: &[u8]) -> Result<&str, Error> {
-    if !all_bytes!(src, is_header_name_token) {
-        return Err(Error::header_name());
-    }
-    // SAFETY: `is_header_name_token` only accepts ASCII.
-    Ok(unsafe { str::from_utf8_unchecked(src) })
-}
-
-/// Checks that `src` is a header field value, in a `const` context.
-///
-/// This is the `const` form of [`header_value`].
-///
-/// # Errors
-///
-/// The same as [`header_value`], including which kind is reported first
-/// when `src` has more than one problem.
-pub const fn header_value_const(src: &[u8]) -> Result<&str, Error> {
+const fn header_value_fault(src: &[u8]) -> Option<Fault> {
     let mut i = 0;
     // Whether the bytes before `i` end in an odd run of backslashes. The
     // head parser looks back for that run only when it meets a control. A
@@ -265,41 +266,44 @@ pub const fn header_value_const(src: &[u8]) -> Result<&str, Error> {
         match b {
             b'\r' => {
                 if i + 1 >= src.len() || src[i + 1] != b'\n' {
-                    return Err(Error::bare_cr());
+                    return Some((Error::bare_cr(), i));
                 }
-                if i + 2 >= src.len() || !matches!(src[i + 2], b' ' | b'\t') {
-                    return Err(Error::header_value());
+                // A `CRLF` must start a fold. Point at what follows it.
+                if i + 2 >= src.len() {
+                    return Some((Error::header_value(), src.len()));
+                }
+                if !matches!(src[i + 2], b' ' | b'\t') {
+                    return Some((Error::header_value(), i + 2));
                 }
                 i += 3;
             }
-            b'\n' => return Err(Error::bare_lf()),
+            b'\n' => return Some((Error::bare_lf(), i)),
             b'\\' => {
                 escaped = !was_escaped;
                 i += 1;
             }
             0x00..=0x08 | 0x0b..=0x0c | 0x0e..=0x1f | 0x7f => {
                 if !was_escaped {
-                    return Err(Error::header_value());
+                    return Some((Error::header_value(), i));
                 }
                 i += 1;
             }
             b if is_header_value_ascii(b) => i += 1,
-            _ => match utf8_char_len(src, i) {
-                Some(len) => i += len,
-                None => return Err(Error::header_value()),
+            _ => match utf8_char(src, i) {
+                Ok(len) => i += len,
+                Err(at) => return Some((Error::header_value(), at)),
             },
         }
     }
-    // SAFETY: Every byte is ASCII or part of a sequence that `utf8_char_len`
-    // accepted.
-    Ok(unsafe { str::from_utf8_unchecked(src) })
+    None
 }
 
-/// Returns the length of the modern UTF-8 sequence that starts at `src[i]`,
-/// or `None` if it is invalid or cut short.
+/// Returns the length of the modern UTF-8 sequence that starts at `src[i]`.
 ///
-/// This accepts the same sequences as the parser's UTF-8 check.
-const fn utf8_char_len(src: &[u8], i: usize) -> Option<usize> {
+/// This accepts the same sequences as the parser's UTF-8 check. If the
+/// sequence is invalid, the error is the offset of the first byte that does
+/// not fit it, or `src.len()` if it is cut short.
+const fn utf8_char(src: &[u8], i: usize) -> Result<usize, usize> {
     // The length, and the range of the second byte. Later bytes are always
     // `0x80..=0xbf`.
     let (len, low, high) = match src[i] {
@@ -310,22 +314,87 @@ const fn utf8_char_len(src: &[u8], i: usize) -> Option<usize> {
         0xf0 => (4, 0x90, 0xbf),
         0xf1..=0xf3 => (4, 0x80, 0xbf),
         0xf4 => (4, 0x80, 0x8f),
-        _ => return None,
+        _ => return Err(i),
     };
-    if i + len > src.len() {
-        return None;
-    }
-    if src[i + 1] < low || src[i + 1] > high {
-        return None;
-    }
-    let mut j = 2;
+    let mut j = 1;
     while j < len {
-        if !matches!(src[i + j], 0x80..=0xbf) {
-            return None;
+        if i + j >= src.len() {
+            return Err(src.len());
+        }
+        let (low, high) = if j == 1 { (low, high) } else { (0x80, 0xbf) };
+        if src[i + j] < low || src[i + j] > high {
+            return Err(i + j);
         }
         j += 1;
     }
-    Some(len)
+    Ok(len)
+}
+
+/// Returns `src` as a `&str` if the scan found no fault.
+///
+/// # Safety
+///
+/// `fault` must come from one of the scans above, run on `src`. Each scan
+/// only passes ASCII and complete modern UTF-8 sequences.
+const unsafe fn into_result(
+    src: &[u8],
+    fault: Option<Fault>,
+) -> Result<&str, Error> {
+    match fault {
+        Some((error, _)) => Err(error),
+        // SAFETY: Forwarded to the caller. The scan found every byte of
+        // `src` to be valid UTF-8.
+        None => Ok(unsafe { str::from_utf8_unchecked(src) }),
+    }
+}
+
+const fn into_offset(fault: Option<Fault>) -> Option<usize> {
+    match fault {
+        Some((_, at)) => Some(at),
+        None => None,
+    }
+}
+
+macro_rules! const_forms {
+    ($(
+        $check:ident, $check_const:ident, $error_offset:ident, $fault:ident;
+    )+) => {
+        $(
+            #[doc = concat!(
+                "Checks `src` like [`", stringify!($check), "`], in a ",
+                "`const` context.\n\n",
+                "# Errors\n\n",
+                "The same as [`", stringify!($check), "`].",
+            )]
+            pub const fn $check_const(src: &[u8]) -> Result<&str, Error> {
+                // SAFETY: The fault comes from the scan for this element,
+                // run on `src`.
+                unsafe { into_result(src, $fault(src)) }
+            }
+
+            #[doc = concat!(
+                "Returns where [`", stringify!($check), "`] fails on `src`, ",
+                "or `None` if it accepts `src`.\n\n",
+                "See [error offsets](self#error-offsets) for what the ",
+                "offset points at.",
+            )]
+            pub const fn $error_offset(src: &[u8]) -> Option<usize> {
+                into_offset($fault(src))
+            }
+        )+
+    };
+}
+
+const_forms! {
+    method, method_const, method_error_offset, method_fault;
+    request_uri, request_uri_const, request_uri_error_offset,
+        request_uri_fault;
+    reason_phrase, reason_phrase_const, reason_phrase_error_offset,
+        reason_phrase_fault;
+    header_name, header_name_const, header_name_error_offset,
+        header_name_fault;
+    header_value, header_value_const, header_value_error_offset,
+        header_value_fault;
 }
 
 #[cfg(test)]
@@ -436,6 +505,71 @@ mod tests {
                 assert_eq!(checked, parsed, "{name} {input:?}");
             });
         }
+    }
+
+    type ErrorOffset = fn(&[u8]) -> Option<usize>;
+
+    const OFFSETS: [(&str, Check, ErrorOffset); 5] = [
+        ("method", method, method_error_offset),
+        ("request_uri", request_uri, request_uri_error_offset),
+        ("reason_phrase", reason_phrase, reason_phrase_error_offset),
+        ("header_name", header_name, header_name_error_offset),
+        ("header_value", header_value, header_value_error_offset),
+    ];
+
+    // An offset exists exactly when the check fails, and lies within the
+    // input or just past it.
+    #[test]
+    #[cfg_attr(miri, ignore = "exhaustive input is too slow under Miri")]
+    fn error_offsets_agree_with_checks() {
+        for (name, check, error_offset) in OFFSETS {
+            for_each_input(4, |input| {
+                let offset = error_offset(input);
+                assert_eq!(
+                    offset.is_some(),
+                    check(input).is_err(),
+                    "{name} {input:?}"
+                );
+                assert!(
+                    offset.map_or(true, |at| at <= input.len()),
+                    "{name} {input:?}"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn error_offsets_point_at_the_fault() {
+        assert_eq!(method_error_offset(b""), Some(0));
+        assert_eq!(method_error_offset(b"IN VITE"), Some(2));
+        assert_eq!(
+            request_uri_error_offset(b"sip:bob@biloxi.example.com#x"),
+            Some(26)
+        );
+        assert_eq!(header_name_error_offset(b"Call-ID:"), Some(7));
+
+        assert_eq!(reason_phrase_error_offset(b"Busy Here"), None);
+        assert_eq!(reason_phrase_error_offset(b"Say \"hi\""), Some(4));
+        assert_eq!(reason_phrase_error_offset(b"100%4g"), Some(5));
+        assert_eq!(reason_phrase_error_offset(b"100%4"), Some(5));
+        assert_eq!(reason_phrase_error_offset(b"ab\xe3\x81"), Some(4));
+        assert_eq!(reason_phrase_error_offset(b"ab\xe3\x41\x81"), Some(3));
+
+        assert_eq!(header_value_error_offset(b"one\r\n two"), None);
+        assert_eq!(header_value_error_offset(b"one\rtwo"), Some(3));
+        assert_eq!(header_value_error_offset(b"one\ntwo"), Some(3));
+        assert_eq!(header_value_error_offset(b"one\r\ntwo"), Some(5));
+        assert_eq!(header_value_error_offset(b"one\r\n"), Some(5));
+        assert_eq!(header_value_error_offset(b"a\\\\\x01"), Some(3));
+        assert_eq!(header_value_error_offset(b"a\\\x01\x01"), Some(3));
+        assert_eq!(header_value_error_offset(b"caf\xc3"), Some(4));
+        assert_eq!(header_value_error_offset(b"\xff"), Some(0));
+    }
+
+    #[test]
+    fn error_offsets_are_const() {
+        const OFFSET: Option<usize> = header_value_error_offset(b"bad\x00");
+        assert_eq!(OFFSET, Some(3));
     }
 
     fn kind(result: Result<&str, Error>) -> ErrorKind {
