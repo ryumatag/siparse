@@ -1,10 +1,13 @@
 name: bench
 
+# Pull requests compare against their base. A squash merge lands the same
+# tree on `main`, so a push there is not benchmarked again. A release tag
+# compares against the release before it.
 on:
   pull_request:
   push:
-    branches:
-      - main
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+*'
 
 permissions:
   contents: read
@@ -15,23 +18,77 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Compares the head benchmarks against the commit this change builds on.
-  # Shared runners are noisy, so the result is informational and never
-  # fails the job. Clippy and the benchmark assertions run in `ci`.
+  # Compares the head benchmarks against a base commit. Shared runners are
+  # noisy, so the result is informational and never fails the job. Clippy
+  # and the benchmark assertions run in `ci`.
+  #
+  # One job per CPU target, so a change that helps one architecture and
+  # hurts another shows up. The delimiter scans are SWAR today, and SIMD
+  # paths for x86_64 and aarch64 are planned.
   compare:
-    runs-on: ubuntu-latest
+    name: compare (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The default x86_64 build, which only assumes SSE2. A SIMD path
+          # that needs more has to detect it at run time to run here.
+          - name: x86_64
+            os: ubuntu-latest
+          # The same runner, built for its own CPU. The difference against
+          # the default build is what run-time detection costs or misses.
+          # The CPU differs between runners, but base and head share one.
+          - name: x86_64-native
+            os: ubuntu-latest
+            rustflags: -C target-cpu=native
+          # NEON is part of the aarch64 baseline, so one build is enough.
+          - name: aarch64
+            os: ubuntu-24.04-arm
+          - name: aarch64-apple
+            os: macos-latest
     env:
+      TARGET: ${{ matrix.name }}
+      RUSTFLAGS: ${{ matrix.rustflags }}
       # The public head benchmarks are the ones used for decisions. Running
       # the whole suite twice would take far longer.
       FILTER: ^parse/(request|response)_head/
-      BASE_SHA: >-
-        ${{ github.event.pull_request.base.sha || github.event.before }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
+          # The base commit and the earlier release tags.
           fetch-depth: 0
+          fetch-tags: true
+      - name: Pick the base commit
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            base="$PR_BASE_SHA"
+            label="$base"
+          else
+            # The highest release below this tag. Only `x.y.z` tags count
+            # as a base, so a pre-release never is one.
+            previous=$(
+              {
+                git tag --list | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$'
+                echo "$GITHUB_REF_NAME"
+              } | sort -uV | awk -v tag="$GITHUB_REF_NAME" \
+                '$0 == tag { print prev; exit } { prev = $0 }'
+            )
+            if [[ -z "$previous" ]]; then
+              echo "No release before $GITHUB_REF_NAME. Skipping."
+              exit 0
+            fi
+            base=$(git rev-parse "$previous^{commit}")
+            label="$previous"
+          fi
+          {
+            echo "BASE_SHA=$base"
+            echo "BASE_LABEL=$label"
+          } >> "$GITHUB_ENV"
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -43,8 +100,11 @@ jobs:
       - name: Benchmark the base commit
         id: base
         run: |
-          # A push that creates the branch has no previous commit, and an
-          # old base may predate the benchmark crate.
+          # A first release has no base, and an old base may predate the
+          # benchmark crate.
+          if [[ -z "$BASE_SHA" ]]; then
+            exit 0
+          fi
           if ! git cat-file -e "$BASE_SHA:bench/Cargo.toml" 2>/dev/null; then
             echo "No benchmarks at base commit $BASE_SHA. Skipping."
             exit 0
@@ -65,7 +125,7 @@ jobs:
         # same tables on the run page.
         run: |
           {
-            echo "## Benchmarks against $BASE_SHA"
+            echo "## Benchmarks on $TARGET against $BASE_LABEL"
             echo
             echo '```'
             critcmp base head
