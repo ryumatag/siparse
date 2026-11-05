@@ -8,6 +8,11 @@ mod start_line;
 
 use crate::{error::Error, iter::Bytes};
 
+pub(crate) use self::{
+    header::{header_name, header_value},
+    start_line::{method, reason_phrase, request_uri},
+};
+
 pub use self::{
     header::{
         parse_header_name, parse_header_value, Header, HeaderBuf, Headers,
@@ -20,13 +25,43 @@ pub use self::{
     },
 };
 
+/// Where a token that a production parses ends.
+///
+/// Inside a head, a token ends at the delimiter after it, such as the `SP`
+/// after a method or the `CRLF` after a header value, and running out of
+/// input means more may arrive. The checks in [`crate::check`] get just the
+/// token, so the end of the input ends it and a delimiter in it is an error.
+///
+/// The productions are generic over this so that the head parser and the
+/// checks share one implementation. Each production is monomorphized per
+/// boundary, so the branches on `WHOLE` cost nothing at run time. Only this
+/// crate implements it.
+pub(crate) trait Boundary {
+    /// `true` if the input is exactly one token.
+    const WHOLE: bool;
+}
+
+/// A token inside a head, ended by its delimiter.
+pub(crate) enum Delimited {}
+
+/// A token that is the whole input.
+pub(crate) enum Whole {}
+
+impl Boundary for Delimited {
+    const WHOLE: bool = false;
+}
+
+impl Boundary for Whole {
+    const WHOLE: bool = true;
+}
+
 /// Parser result type used by the SIP head parser.
 ///
 /// A successful parse returns either:
 ///
 /// * `Status::Partial` if more input is required
 /// * `Status::Complete(T)` if a full SIP head has been parsed
-type Result<T> = core::result::Result<Status<T>, Error>;
+pub(crate) type Result<T> = core::result::Result<Status<T>, Error>;
 
 /// Whether the input contained a complete SIP head.
 ///

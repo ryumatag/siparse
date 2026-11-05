@@ -87,68 +87,68 @@ impl Error {
 
     /// Returns an error indicating an invalid SIP version.
     #[inline]
-    pub(crate) fn version() -> Error {
+    pub(crate) const fn version() -> Error {
         Error { kind: ErrorKind::Version }
     }
 
     /// Returns an error indicating an invalid SIP method token.
     #[inline]
-    pub(crate) fn method() -> Error {
+    pub(crate) const fn method() -> Error {
         Error { kind: ErrorKind::Method }
     }
 
     /// Returns an error indicating an invalid SIP request URI.
     #[inline]
-    pub(crate) fn request_uri() -> Error {
+    pub(crate) const fn request_uri() -> Error {
         Error { kind: ErrorKind::RequestUri }
     }
 
     /// Returns an error indicating an invalid SIP status code.
     #[inline]
-    pub(crate) fn status_code() -> Error {
+    pub(crate) const fn status_code() -> Error {
         Error { kind: ErrorKind::StatusCode }
     }
 
     /// Returns an error indicating an invalid SIP reason phrase.
     #[inline]
-    pub(crate) fn reason_phrase() -> Error {
+    pub(crate) const fn reason_phrase() -> Error {
         Error { kind: ErrorKind::ReasonPhrase }
     }
 
     /// Returns an error indicating an invalid SIP header field name.
     #[inline]
-    pub(crate) fn header_name() -> Error {
+    pub(crate) const fn header_name() -> Error {
         Error { kind: ErrorKind::HeaderName }
     }
 
     /// Returns an error indicating a header name not followed by `:`.
     #[inline]
-    pub(crate) fn missing_colon() -> Error {
+    pub(crate) const fn missing_colon() -> Error {
         Error { kind: ErrorKind::MissingColon }
     }
 
     /// Returns an error indicating a `CR` not followed by `LF`.
     #[inline]
-    pub(crate) fn bare_cr() -> Error {
+    pub(crate) const fn bare_cr() -> Error {
         Error { kind: ErrorKind::BareCr }
     }
 
     /// Returns an error indicating an `LF` not preceded by `CR`.
     #[inline]
-    pub(crate) fn bare_lf() -> Error {
+    pub(crate) const fn bare_lf() -> Error {
         Error { kind: ErrorKind::BareLf }
     }
 
     /// Returns an error indicating an invalid SIP header field value.
     #[inline]
-    pub(crate) fn header_value() -> Error {
+    pub(crate) const fn header_value() -> Error {
         Error { kind: ErrorKind::HeaderValue }
     }
 
     /// Returns an error indicating that the caller-provided header row buffer
     /// was too small to hold all parsed header rows.
     #[inline]
-    pub(crate) fn too_many_headers() -> Error {
+    pub(crate) const fn too_many_headers() -> Error {
         Error { kind: ErrorKind::TooManyHeaders }
     }
 }

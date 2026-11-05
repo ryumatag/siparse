@@ -2,6 +2,7 @@ use criterion::{Bencher, Criterion, Throughput};
 use siparse::_private as private;
 
 mod any;
+mod check;
 mod corpus;
 mod header_name;
 mod header_value;
@@ -30,6 +31,9 @@ criterion::criterion_group! {
         request::parse,
         response::parse,
         any::parse,
+        // Public checks of single elements. The plain forms share the head
+        // parser's productions, and the `const` forms are scalar.
+        check::check,
         // Private API. These call one production directly, so the compiler
         // inlines it into the benchmark loop instead of into `parse_head`,
         // and the generated code differs from what the public API runs.

@@ -13,11 +13,18 @@ type ByteBlock = [u8; BLOCK_SIZE];
 const HI: usize = uniform_block(0x80);
 const LO7: usize = uniform_block(0x7f);
 
+// The `match_*_vectored` scans are `#[inline(always)]`. Each production has
+// a copy for the head parser and one for `crate::check`, so a scan used by
+// both has two callers. With a plain `#[inline]`, LLVM then kept the scan
+// out of line in a binary that used both, and whole-head parsing got up to
+// 28% slower in the benchmarks. Forcing the scans inline brought it back
+// within noise.
+
 // The URI scan checks each byte against the lookup table instead of using a
 // bitwise block predicate. Rejecting the ten visible ASCII bytes outside the
 // URI token set takes ten `eq_byte` tests per block, which measured up to
 // 47% slower than eight table lookups on short URIs.
-#[inline]
+#[inline(always)]
 pub(crate) fn match_uri_vectored(bytes: &mut Bytes<'_>) {
     while let Some(block) = bytes.peek_n::<BLOCK_SIZE>() {
         let n = match_block(is_uri_token, block);
@@ -35,7 +42,7 @@ pub(crate) fn match_uri_vectored(bytes: &mut Bytes<'_>) {
     unsafe { bytes.advance(n) };
 }
 
-#[inline]
+#[inline(always)]
 pub(crate) fn match_header_name_vectored(bytes: &mut Bytes<'_>) {
     while let Some(block) = bytes.peek_n::<BLOCK_SIZE>() {
         let n = match_block(is_header_name_token, block);
@@ -53,7 +60,7 @@ pub(crate) fn match_header_name_vectored(bytes: &mut Bytes<'_>) {
     unsafe { bytes.advance(n) };
 }
 
-#[inline]
+#[inline(always)]
 pub(crate) fn match_header_value_vectored(bytes: &mut Bytes<'_>) {
     while let Some(block) = bytes.peek_n::<BLOCK_SIZE>() {
         let n = match_header_value_block(block);
@@ -71,7 +78,7 @@ pub(crate) fn match_header_value_vectored(bytes: &mut Bytes<'_>) {
     unsafe { bytes.advance(n) };
 }
 
-#[inline]
+#[inline(always)]
 pub(crate) fn match_reason_phrase_ascii_vectored(bytes: &mut Bytes<'_>) {
     while let Some(block) = bytes.peek_n::<BLOCK_SIZE>() {
         let n = match_reason_phrase_ascii_block(block);

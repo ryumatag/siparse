@@ -1,7 +1,7 @@
 use crate::{
     error::Error,
     iter::Bytes,
-    parse::{Result, Status},
+    parse::{Boundary, Delimited, Result, Status},
     simd,
     token::is_method_token,
     utf8::parse_utf8_run,
@@ -123,6 +123,7 @@ pub(super) fn parse_start_line<'buf>(
             {
                 return Ok(Status::Partial);
             }
+
             false
         }
     };
@@ -160,9 +161,9 @@ pub(super) fn parse_request_line<'buf>(
     //
     // Ref: https://www.rfc-editor.org/rfc/rfc3261.html#section-7.1
 
-    line.method = Some(complete!(parse_method(bytes)));
+    line.method = Some(complete!(method::<Delimited>(bytes)));
     ensure!(bytes.next() == b' ' => Error::method());
-    line.uri = Some(complete!(parse_request_uri(bytes)));
+    line.uri = Some(complete!(request_uri::<Delimited>(bytes)));
     ensure!(bytes.next() == b' ' => Error::request_uri());
     line.version = Some(complete!(parse_version(bytes)));
     complete!(parse_crlf(bytes, Error::version()));
@@ -173,44 +174,69 @@ pub(super) fn parse_request_line<'buf>(
 #[allow(missing_docs)]
 #[inline]
 pub fn parse_method<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
+    method::<Delimited>(bytes)
+}
+
+#[inline]
+pub(crate) fn method<'buf, B: Boundary>(
+    bytes: &mut Bytes<'buf>,
+) -> Result<&'buf str> {
     // TODO: Add a fast-path here only when benchmarks justify it.
 
     let mark = bytes.mark_token();
 
     loop {
-        match peek!(bytes) {
-            b' ' if mark.is_empty(bytes) => return Err(Error::method()),
-            b' ' => {
-                // SAFETY: Every consumed byte satisfied `is_method_token`,
-                // which only accepts ASCII.
-                let method = unsafe { mark.exit_str(bytes) };
-                return Ok(Status::Complete(method));
-            }
-            b if is_method_token(b) => {
-                // SAFETY: `peek!` just returned a byte.
+        match peek_or_end!(bytes, B) {
+            // The end of a whole token, or the `SP` after one in a head.
+            None => break,
+            Some(b' ') if !B::WHOLE => break,
+            Some(b) if is_method_token(b) => {
+                // SAFETY: `peek_or_end!` just returned a byte.
                 unsafe { bytes.advance(1) }
             }
-            _ => return Err(Error::method()),
+            Some(_) => return Err(Error::method()),
         }
     }
+
+    if mark.is_empty(bytes) {
+        return Err(Error::method());
+    }
+    // SAFETY: Every consumed byte satisfied `is_method_token`, which only
+    // accepts ASCII.
+    let method = unsafe { mark.exit_str(bytes) };
+
+    Ok(Status::Complete(method))
 }
 
 #[allow(missing_docs)]
 #[inline]
 pub fn parse_request_uri<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
+    request_uri::<Delimited>(bytes)
+}
+
+#[inline]
+pub(crate) fn request_uri<'buf, B: Boundary>(
+    bytes: &mut Bytes<'buf>,
+) -> Result<&'buf str> {
     let mark = bytes.mark_token();
 
     simd::match_uri_vectored(bytes);
 
-    match peek!(bytes) {
-        b' ' if !mark.is_empty(bytes) => {
-            // SAFETY: `match_uri_vectored` only consumes bytes that satisfy
-            // `is_uri_token`, which rejects raw non-ASCII.
-            let uri = unsafe { mark.exit_str(bytes) };
-            Ok(Status::Complete(uri))
-        }
-        _ => Err(Error::request_uri()),
+    match peek_or_end!(bytes, B) {
+        // The end of a whole token, or the `SP` after one in a head.
+        None => {}
+        Some(b' ') if !B::WHOLE => {}
+        Some(_) => return Err(Error::request_uri()),
     }
+
+    if mark.is_empty(bytes) {
+        return Err(Error::request_uri());
+    }
+    // SAFETY: `match_uri_vectored` only consumes bytes that satisfy
+    // `is_uri_token`, which rejects raw non-ASCII.
+    let uri = unsafe { mark.exit_str(bytes) };
+
+    Ok(Status::Complete(uri))
 }
 
 #[inline]
@@ -228,7 +254,7 @@ pub(super) fn parse_status_line<'buf>(
     ensure!(bytes.next() == b' ' => Error::version());
     line.status_code = Some(complete!(parse_status_code(bytes)));
     ensure!(bytes.next() == b' ' => Error::status_code());
-    line.reason_phrase = Some(complete!(parse_reason_phrase(bytes)));
+    line.reason_phrase = Some(complete!(reason_phrase::<Delimited>(bytes)));
     // `parse_reason_phrase` only stops before `CR`, so `parse_crlf` never
     // sees another byte here.
     complete!(parse_crlf(bytes, Error::reason_phrase()));
@@ -249,12 +275,20 @@ pub fn parse_status_code<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
 
     // SAFETY: Exactly three ASCII digits were consumed.
     let status_code = unsafe { mark.exit_str(bytes) };
+
     Ok(Status::Complete(status_code))
 }
 
 #[allow(missing_docs)]
 #[inline]
 pub fn parse_reason_phrase<'buf>(
+    bytes: &mut Bytes<'buf>,
+) -> Result<&'buf str> {
+    reason_phrase::<Delimited>(bytes)
+}
+
+#[inline]
+pub(crate) fn reason_phrase<'buf, B: Boundary>(
     bytes: &mut Bytes<'buf>,
 ) -> Result<&'buf str> {
     let mark = bytes.mark_token();
@@ -266,22 +300,20 @@ pub fn parse_reason_phrase<'buf>(
         // `is_reason_phrase_octet` returns true. The next byte is
         // therefore guaranteed to be outside that set, so there is no arm here
         // for `is_reason_phrase_octet`.
-        match peek!(bytes) {
-            b'\r' => {
-                // SAFETY: Every consumed byte is an ASCII
-                // `is_reason_phrase_octet`, part of an ASCII `%`-escape, or
-                // part of a sequence accepted by `parse_utf8_run`.
-                let reason_phrase = unsafe { mark.exit_str(bytes) };
-                return Ok(Status::Complete(reason_phrase));
-            }
-            b'\n' => return Err(Error::bare_lf()),
-            b'%' => {
-                // SAFETY: `peek!` just returned a byte.
+        match peek_or_end!(bytes, B) {
+            // The end of a whole token, or the `CR` after one in a head.
+            None => break,
+            Some(b'\r') if !B::WHOLE => break,
+            // A whole reason phrase has no line ending to blame a bare `LF`
+            // on, so it is just a byte the phrase does not allow.
+            Some(b'\n') if !B::WHOLE => return Err(Error::bare_lf()),
+            Some(b'%') => {
+                // SAFETY: `peek_or_end!` just returned a byte.
                 unsafe { bytes.advance(1) };
                 complete!(parse_escaped_octet(bytes));
             }
             // Validated in place on purpose. See `parse_header_value`.
-            b if b >= 0x80 => {
+            Some(b) if b >= 0x80 => {
                 complete!(
                     parse_utf8_run(bytes).map_err(|_| Error::reason_phrase())
                 );
@@ -289,6 +321,13 @@ pub fn parse_reason_phrase<'buf>(
             _ => return Err(Error::reason_phrase()),
         }
     }
+
+    // SAFETY: Every consumed byte is an ASCII `is_reason_phrase_octet`, part
+    // of an ASCII `%`-escape, or part of a sequence accepted by
+    // `parse_utf8_run`.
+    let reason_phrase = unsafe { mark.exit_str(bytes) };
+
+    Ok(Status::Complete(reason_phrase))
 }
 
 #[allow(missing_docs)]
@@ -341,6 +380,7 @@ pub fn parse_version<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
 
     // SAFETY: Every consumed byte matched one of the ASCII patterns above.
     let version = unsafe { mark.exit_str(bytes) };
+
     Ok(Status::Complete(version))
 }
 
