@@ -24,6 +24,17 @@ cargo +nightly fuzz run find_head_end \
     -max_total_time=30 -max_len=4096
 ```
 
+The `scan` target compares each function of [`siparse::scan`] against a
+scalar reference at every character boundary of the input, and checks that
+the element and the rest are the two halves of the input:
+
+```text
+mkdir -p tmp/fuzz-scan
+cargo +nightly fuzz run scan \
+    tmp/fuzz-scan fuzz/corpus/scan -- \
+    -max_total_time=30 -max_len=4096
+```
+
 The harness checks borrowed ranges and initialized rows on every outcome,
 including errors. It compares parsing results across header buffer capacities,
 including zero, exact-fit, and insufficient capacities, using a 16-slot parse
@@ -290,9 +301,147 @@ harness!(
     b"SIP/2.0 200 OK\r\nX: prime\r\n\r\n"
 );
 
+/// Checks every scan against a scalar reference at every character boundary.
+///
+/// A scan only applies to a header value, which is valid UTF-8, so input
+/// that is not is skipped. Each scan must either return `None` or split the
+/// input in two at the reference's position, with both halves borrowed from
+/// it.
+pub fn scan(input: &[u8]) {
+    use siparse::scan;
+
+    let Ok(input) = std::str::from_utf8(input) else {
+        return;
+    };
+
+    fn run(src: &str, accept: impl Fn(u8) -> bool) -> Option<(&str, &str)> {
+        let n = src.bytes().take_while(|&b| accept(b)).count();
+        (n > 0).then(|| src.split_at(n))
+    }
+
+    fn is_token(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b"-.!%*_+`'~".contains(&b)
+    }
+
+    fn is_hostname(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'-' || b == b'.'
+    }
+
+    fn is_ipv6(b: u8) -> bool {
+        b.is_ascii_hexdigit() || b == b':' || b == b'.'
+    }
+
+    fn whitespace(src: &str) -> usize {
+        src.bytes()
+            .take_while(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+            .count()
+    }
+
+    fn host(src: &str) -> Option<(&str, &str)> {
+        match src.strip_prefix('[') {
+            Some(rest) => {
+                let (address, rest) = run(rest, is_ipv6)?;
+                rest.strip_prefix(']')?;
+                Some(src.split_at(address.len() + 2))
+            }
+            None => run(src, is_hostname),
+        }
+    }
+
+    fn quoted_string(src: &str) -> Option<(&str, &str)> {
+        let bytes = src.as_bytes();
+        if bytes.first() != Some(&b'"') {
+            return None;
+        }
+        let mut i = 1;
+        loop {
+            match *bytes.get(i)? {
+                b'"' => return Some(src.split_at(i + 1)),
+                b'\\' => match *bytes.get(i + 1)? {
+                    b'\r' | b'\n' | 0x80.. => return None,
+                    _ => i += 2,
+                },
+                _ => i += 1,
+            }
+        }
+    }
+
+    fn check(
+        src: &str,
+        actual: Option<(&str, &str)>,
+        expected: Option<(&str, &str)>,
+        what: &str,
+    ) {
+        assert_eq!(actual, expected, "{what} {src:?}");
+        if let Some((element, rest)) = actual {
+            borrowed_range(src.as_bytes(), element);
+            borrowed_range(src.as_bytes(), rest);
+            assert_eq!(element.len() + rest.len(), src.len());
+            assert_eq!(
+                rest.as_ptr() as usize,
+                src.as_ptr() as usize + element.len()
+            );
+        }
+    }
+
+    let starts = input.char_indices().map(|(i, _)| i);
+    for start in starts.chain([input.len()]) {
+        let src = &input[start..];
+        let ws = whitespace(src);
+
+        assert_eq!(scan::sws(src), &src[ws..], "sws {src:?}");
+        assert_eq!(
+            scan::lws(src),
+            (ws > 0).then(|| &src[ws..]),
+            "lws {src:?}"
+        );
+        for sep in [';', ',', ':', '=', '/', '\u{e9}'] {
+            let expected = src[ws..]
+                .strip_prefix(sep)
+                .map(|rest| &rest[whitespace(rest)..]);
+            assert_eq!(
+                scan::separator(src, sep),
+                expected,
+                "separator {sep:?} {src:?}"
+            );
+        }
+        check(src, scan::token(src), run(src, is_token), "token");
+        check(
+            src,
+            scan::digits(src),
+            run(src, |b| b.is_ascii_digit()),
+            "digits",
+        );
+        check(src, scan::host(src), host(src), "host");
+        check(
+            src,
+            scan::quoted_string(src),
+            quoted_string(src),
+            "quoted_string",
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_seeds() {
+        for seed in [
+            &b""[..],
+            b"SIP/2.0/UDP pc33.atlanta.example.com:5060;branch=z9hG4bK776asdhds",
+            b"SIP/2.0/TCP [2001:db8::1]:5061;rport;received=192.0.2.4 , SIP/2.0/UDP a",
+            b"\"Bob \\\"B\\\" Smith\" <sip:bob@biloxi.example.com>;tag=a6c85cf",
+            b"\"\xe7\x94\xb0\xe4\xb8\xad\" <sip:tanaka@example.com>",
+            b"314159 INVITE",
+            b"\"unterminated\\",
+            b"\"\\\xc3\xa9\"",
+            b"\xff",
+        ] {
+            scan(seed);
+        }
+    }
 
     #[derive(Clone, Copy)]
     enum Expected {

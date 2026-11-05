@@ -1,8 +1,8 @@
 use crate::{
     iter::Bytes,
     token::{
-        is_header_name_token, is_header_value_ascii, is_reason_phrase_octet,
-        is_uri_token,
+        is_header_name_token, is_header_value_ascii, is_hostname_byte,
+        is_ipv6_byte, is_reason_phrase_octet, is_token, is_uri_token,
     },
 };
 
@@ -93,6 +93,99 @@ pub(crate) fn match_reason_phrase_ascii_vectored(bytes: &mut Bytes<'_>) {
     let n = match_tail(is_reason_phrase_octet, bytes.remaining());
     // SAFETY: `match_tail` returns at most the remaining length.
     unsafe { bytes.advance(n) };
+}
+
+// The scans for `crate::scan`. Each consumes the bytes of one class, so
+// the caller finds the element's end at the cursor. They go through one
+// generic loop, since a table lookup per byte is as fast as a bitwise block
+// predicate for these sets (see the URI scan above) and keeps each one a
+// line long.
+
+#[inline]
+pub(crate) fn match_token_vectored(bytes: &mut Bytes<'_>) {
+    match_table_vectored(is_token, bytes);
+}
+
+#[inline]
+pub(crate) fn match_digits_vectored(bytes: &mut Bytes<'_>) {
+    match_table_vectored(|b| b.is_ascii_digit(), bytes);
+}
+
+#[inline]
+pub(crate) fn match_hostname_vectored(bytes: &mut Bytes<'_>) {
+    match_table_vectored(is_hostname_byte, bytes);
+}
+
+#[inline]
+pub(crate) fn match_ipv6_vectored(bytes: &mut Bytes<'_>) {
+    match_table_vectored(is_ipv6_byte, bytes);
+}
+
+/// Advances `bytes` over `qdtext`, stopping at the first `"` or `\`.
+///
+/// The content of a quoted string was checked as a header value already,
+/// so only the two bytes that end or escape it matter here.
+#[inline]
+pub(crate) fn match_qdtext_vectored(bytes: &mut Bytes<'_>) {
+    const DQUOTE: usize = uniform_block(b'"');
+    const BACKSLASH: usize = uniform_block(b'\\');
+
+    while let Some(block) = bytes.peek_n::<BLOCK_SIZE>() {
+        let x = usize::from_ne_bytes(block);
+        let n = offsetnz(eq_byte(x, DQUOTE) | eq_byte(x, BACKSLASH));
+
+        // SAFETY: `n <= BLOCK_SIZE`, and `peek_n` saw a full block.
+        unsafe { bytes.advance(n) };
+
+        if n != BLOCK_SIZE {
+            return;
+        }
+    }
+
+    let n = scan_tail(|b| !matches!(b, b'"' | b'\\'), bytes.remaining());
+    // SAFETY: `scan_tail` returns at most the remaining length.
+    unsafe { bytes.advance(n) };
+}
+
+#[inline(always)]
+fn match_table_vectored(
+    predicate: impl Fn(u8) -> bool,
+    bytes: &mut Bytes<'_>,
+) {
+    while let Some(block) = bytes.peek_n::<BLOCK_SIZE>() {
+        let mut n = BLOCK_SIZE;
+        for (i, &b) in block.iter().enumerate() {
+            if !predicate(b) {
+                n = i;
+                break;
+            }
+        }
+
+        // SAFETY: `n <= BLOCK_SIZE`, and `peek_n` saw a full block.
+        unsafe { bytes.advance(n) };
+
+        if n != BLOCK_SIZE {
+            return;
+        }
+    }
+
+    let n = scan_tail(&predicate, bytes.remaining());
+    // SAFETY: `scan_tail` returns at most the remaining length.
+    unsafe { bytes.advance(n) };
+}
+
+// The scans keep their own tail loop so that they add no callers to
+// `match_tail`, which the head parser's scans share.
+#[cold]
+#[inline]
+fn scan_tail(predicate: impl Fn(u8) -> bool, bytes: &[u8]) -> usize {
+    for (i, &b) in bytes.iter().enumerate() {
+        if !predicate(b) {
+            return i;
+        }
+    }
+
+    bytes.len()
 }
 
 /// Advances `bytes` to the first `\r\n\r\n` at or after the cursor and returns

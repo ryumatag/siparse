@@ -34,6 +34,14 @@ const REASON_PHRASE_OCTET_MAP: [bool; 256] = byte_map!(
     b' ' | b'\t'
 );
 
+const HOSTNAME_MAP: [bool; 256] = byte_map!(
+    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.'
+);
+
+const IPV6_MAP: [bool; 256] = byte_map!(
+    b'0'..=b'9' | b'A'..=b'F' | b'a'..=b'f' | b':' | b'.'
+);
+
 /// Returns whether `b` is valid in a SIP `Method` token.
 ///
 /// This follows RFC 3261's `token` production, which also defines
@@ -135,4 +143,45 @@ pub(crate) const fn is_header_value_ascii(b: u8) -> bool {
 #[inline]
 pub(crate) const fn is_reason_phrase_octet(b: u8) -> bool {
     REASON_PHRASE_OCTET_MAP[b as usize]
+}
+
+/// Returns whether `b` is valid in an RFC 3261 `token`.
+#[inline]
+pub(crate) const fn is_token(b: u8) -> bool {
+    TOKEN_MAP[b as usize]
+}
+
+/// Returns whether `b` is valid in a `hostname` or an `IPv4address`.
+///
+/// RFC 3261, Section 25.1:
+///
+/// > ```text
+/// > hostname     =  *( domainlabel "." ) toplabel [ "." ]
+/// > domainlabel  =  alphanum / alphanum *( alphanum / "-" ) alphanum
+/// > toplabel     =  ALPHA / ALPHA *( alphanum / "-" ) alphanum
+/// > IPv4address  =  1*3DIGIT "." 1*3DIGIT "." 1*3DIGIT "." 1*3DIGIT
+/// > ```
+///
+/// This is the character class only. The structure is left to the consumer.
+#[inline]
+pub(crate) const fn is_hostname_byte(b: u8) -> bool {
+    HOSTNAME_MAP[b as usize]
+}
+
+/// Returns whether `b` is valid inside the brackets of an `IPv6reference`.
+///
+/// RFC 3261, Section 25.1:
+///
+/// > ```text
+/// > IPv6reference  =  "[" IPv6address "]"
+/// > IPv6address    =  hexpart [ ":" IPv4address ]
+/// > hexpart        =  hexseq / hexseq "::" [ hexseq ] / "::" [ hexseq ]
+/// > hexseq         =  hex4 *( ":" hex4)
+/// > hex4           =  1*4HEXDIG
+/// > ```
+///
+/// This is the character class only. The structure is left to the consumer.
+#[inline]
+pub(crate) const fn is_ipv6_byte(b: u8) -> bool {
+    IPV6_MAP[b as usize]
 }

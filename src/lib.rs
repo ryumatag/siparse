@@ -137,11 +137,20 @@ transport and buffer-type dependencies.
 
 # Checking single elements
 
-The [`check`] module checks one element at a time, such as a header value
-that an application built, against the same rules the parser applies in a
-head. A crate that builds SIP messages can use it instead of copying the
-grammar. Each check also has a `const fn` form for checking constants at
-compile time.
+The [`check`] module checks one element at a time, such as a header value that
+an application built, against the same rules the parser applies in a head. A
+crate that builds SIP messages can use it instead of copying the grammar. Each
+check also has a `const fn` form for checking constants at compile time.
+
+# Scanning inside a value
+
+The [`scan`] module splits a header value into the elements that RFC 3261
+section 25.1 builds every header grammar from, such as a `token`, a `host`, or
+a `quoted-string`. A crate that reads typed headers, or a transport that needs
+the `branch` of a `Via`, uses it instead of copying those rules. Each scan
+takes the rest of a value and returns the element at its start as a `&str`,
+together with what follows it. What an element means is still left to the
+consumer.
 
 # Parsing policy
 
@@ -228,6 +237,7 @@ pub mod check;
 mod error;
 mod iter;
 mod parse;
+pub mod scan;
 mod simd;
 mod token;
 mod utf8;
