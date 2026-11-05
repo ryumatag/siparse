@@ -26,6 +26,9 @@ include = [
 [features]
 default = ["std"]
 std = []
+# Exposes crate internals to the benchmark crate in `bench/`. Unstable, with
+# no semver guarantee. Not for use outside this repository.
+__bench = []
 
 [[example]]
 name = "parse_request"

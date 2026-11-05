@@ -1,11 +1,9 @@
 use std::hint::black_box as bb;
 
 use criterion::Criterion;
+use siparse::bench::{parse_status_code, Bytes};
 
-use crate::{
-    benchmark,
-    private::{parse_status_code, Bytes},
-};
+use crate::benchmark;
 
 pub(super) fn parse(c: &mut Criterion) {
     // Every status code has three ASCII digits followed by SP, so one

@@ -9,6 +9,9 @@ use core::{marker::PhantomData, slice, str};
 // benchmarks. The cost is that `advance` is `unsafe`, so every caller must
 // show that enough bytes remain, usually through the `peek` or `peek_n`
 // right before it.
+// `pub` only so the `__bench` feature can re-export it. Without the feature
+// nothing reaches it, which `unreachable_pub` would otherwise flag.
+#[cfg_attr(not(feature = "__bench"), allow(unreachable_pub))]
 #[allow(missing_docs)]
 #[derive(Debug)]
 pub struct Bytes<'a> {
@@ -29,6 +32,10 @@ pub(crate) struct TokenMark {
 }
 
 impl<'a> Bytes<'a> {
+    // `pub` only so the `__bench` feature can re-export it. Without the
+    // feature nothing reaches it, which `unreachable_pub` would otherwise
+    // flag.
+    #[cfg_attr(not(feature = "__bench"), allow(unreachable_pub))]
     #[allow(missing_docs)]
     #[inline]
     pub fn new(buf: &'a [u8]) -> Bytes<'a> {

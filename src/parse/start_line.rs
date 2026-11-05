@@ -171,12 +171,6 @@ pub(super) fn parse_request_line<'buf>(
     Ok(Status::Complete(()))
 }
 
-#[allow(missing_docs)]
-#[inline]
-pub fn parse_method<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
-    method::<Delimited>(bytes)
-}
-
 #[inline]
 pub(crate) fn method<'buf, B: Boundary>(
     bytes: &mut Bytes<'buf>,
@@ -206,12 +200,6 @@ pub(crate) fn method<'buf, B: Boundary>(
     let method = unsafe { mark.exit_str(bytes) };
 
     Ok(Status::Complete(method))
-}
-
-#[allow(missing_docs)]
-#[inline]
-pub fn parse_request_uri<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
-    request_uri::<Delimited>(bytes)
 }
 
 #[inline]
@@ -262,9 +250,10 @@ pub(super) fn parse_status_line<'buf>(
     Ok(Status::Complete(()))
 }
 
-#[allow(missing_docs)]
 #[inline]
-pub fn parse_status_code<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
+pub(crate) fn parse_status_code<'buf>(
+    bytes: &mut Bytes<'buf>,
+) -> Result<&'buf str> {
     let mark = bytes.mark_token();
 
     ensure!(bytes.next() == b'0'..=b'9' => Error::status_code());
@@ -277,14 +266,6 @@ pub fn parse_status_code<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
     let status_code = unsafe { mark.exit_str(bytes) };
 
     Ok(Status::Complete(status_code))
-}
-
-#[allow(missing_docs)]
-#[inline]
-pub fn parse_reason_phrase<'buf>(
-    bytes: &mut Bytes<'buf>,
-) -> Result<&'buf str> {
-    reason_phrase::<Delimited>(bytes)
 }
 
 #[inline]
@@ -345,9 +326,10 @@ fn parse_escaped_octet(bytes: &mut Bytes<'_>) -> Result<()> {
     Ok(Status::Complete(()))
 }
 
-#[allow(missing_docs)]
 #[inline]
-pub fn parse_version<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
+pub(crate) fn parse_version<'buf>(
+    bytes: &mut Bytes<'buf>,
+) -> Result<&'buf str> {
     const SIP_2_0: [u8; 7] = *b"SIP/2.0";
 
     let mark = bytes.mark_token();
