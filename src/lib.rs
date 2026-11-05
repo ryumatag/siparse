@@ -136,6 +136,14 @@ transport and buffer-type dependencies.
 [`BytesMut`]: https://docs.rs/bytes/latest/bytes/struct.BytesMut.html
 [RFC 5626]: https://www.rfc-editor.org/rfc/rfc5626
 
+# Checking single elements
+
+The [`check`] module checks one element at a time, such as a header value
+that an application built, against the same rules the parser applies in a
+head. A crate that builds SIP messages can use it instead of copying the
+grammar. Each check also has a `const fn` form for checking constants at
+compile time.
+
 # Parsing policy
 
 ### Header values
@@ -214,6 +222,7 @@ extern crate std;
 #[macro_use]
 mod macros;
 
+pub mod check;
 mod error;
 mod iter;
 mod parse;

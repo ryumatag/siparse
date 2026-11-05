@@ -6,7 +6,7 @@ use core::{
 use crate::{
     error::Error,
     iter::Bytes,
-    parse::{Result, Status},
+    parse::{Boundary, Delimited, Result, Status},
     simd,
     token::is_header_name_token,
     utf8::parse_utf8_run,
@@ -278,6 +278,13 @@ fn parse_header<'buf>(buf: &mut Bytes<'buf>) -> Result<Option<Header<'buf>>> {
 #[allow(missing_docs)]
 #[inline]
 pub fn parse_header_name<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
+    header_name::<Delimited>(bytes)
+}
+
+#[inline]
+pub(crate) fn header_name<'buf, B: Boundary>(
+    bytes: &mut Bytes<'buf>,
+) -> Result<&'buf str> {
     let mark = bytes.mark_token();
 
     simd::match_header_name_vectored(bytes);
@@ -286,7 +293,17 @@ pub fn parse_header_name<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
     // `is_header_name_token`, which only accepts ASCII.
     let name = unsafe { mark.exit_str(bytes) };
 
-    match peek!(bytes) {
+    let b = match peek_or_end!(bytes, B) {
+        // The end of a whole token.
+        None if name.is_empty() => return Err(Error::header_name()),
+        None => return Ok(Status::Complete(name)),
+        // A whole name has no `:` to miss, so whitespace is just a byte
+        // the name does not allow.
+        Some(_) if B::WHOLE => return Err(Error::header_name()),
+        Some(b) => b,
+    };
+
+    match b {
         b':' if name.is_empty() => Err(Error::header_name()),
         b':' => Ok(Status::Complete(name)),
         b' ' | b'\t' => {
@@ -311,19 +328,36 @@ pub fn parse_header_name<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
 #[allow(missing_docs)]
 #[inline]
 pub fn parse_header_value<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
+    header_value::<Delimited>(bytes)
+}
+
+#[inline]
+pub(crate) fn header_value<'buf, B: Boundary>(
+    bytes: &mut Bytes<'buf>,
+) -> Result<&'buf str> {
     let mut mark = bytes.mark_token();
 
     loop {
         simd::match_header_value_vectored(bytes);
 
-        match peek!(bytes) {
+        let Some(b) = peek_or_end!(bytes, B) else {
+            // The end of a whole value.
+            break;
+        };
+        match b {
             b'\r' => {
-                // SAFETY: `peek` just returned a byte.
+                // SAFETY: `peek_or_end!` just returned a byte.
                 unsafe { bytes.advance(1) };
-                ensure!(bytes.next() == b'\n' => Error::bare_cr());
-                match peek!(bytes) {
-                    b' ' | b'\t' => {
-                        // SAFETY: `peek!` just returned a byte.
+                match bytes.next() {
+                    Some(b'\n') => {}
+                    // A whole value cannot be continued, so a final `CR`
+                    // is bare.
+                    None if !B::WHOLE => return Ok(Status::Partial),
+                    _ => return Err(Error::bare_cr()),
+                }
+                match peek_or_end!(bytes, B) {
+                    Some(b' ' | b'\t') => {
+                        // SAFETY: `peek_or_end!` just returned a byte.
                         unsafe { bytes.advance(1) };
 
                         // RFC 3261 defines `HCOLON = *( SP / HTAB ) ":" SWS`
@@ -332,11 +366,12 @@ pub fn parse_header_value<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
                         // value starts after it and its whitespace.
                         // `parse_header` has already skipped `SP` / `HTAB`
                         // after the colon, so such a fold ends exactly 3 bytes
-                        // past the mark.
+                        // past the mark. A whole value has no separator, so
+                        // it keeps its leading whitespace.
                         //
                         // Checking here keeps leading folds off the common
                         // path, because only a fold reaches this arm.
-                        if mark.len(bytes) == 3 {
+                        if !B::WHOLE && mark.len(bytes) == 3 {
                             while matches!(bytes.peek(), Some(b' ' | b'\t')) {
                                 // SAFETY: `peek` just returned a byte.
                                 unsafe { bytes.advance(1) };
@@ -344,6 +379,8 @@ pub fn parse_header_value<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
                             mark = bytes.mark_token();
                         }
                     }
+                    // A `CRLF` inside a whole value must start a fold.
+                    _ if B::WHOLE => return Err(Error::header_value()),
                     _ => {
                         // SAFETY: Every consumed byte is an ASCII
                         // `is_header_value_ascii` byte, an escaped ASCII
@@ -380,12 +417,20 @@ pub fn parse_header_value<'buf>(bytes: &mut Bytes<'buf>) -> Result<&'buf str> {
                 if !has_unpaired_backslash(prefix) {
                     return Err(Error::header_value());
                 }
-                // SAFETY: `peek!` just returned the control byte.
+                // SAFETY: `peek_or_end!` just returned the control byte.
                 unsafe { bytes.advance(1) };
             }
             _ => return Err(Error::header_value()),
         }
     }
+
+    // Only a whole value gets here, at the end of the input.
+    //
+    // SAFETY: Every consumed byte passed the same checks as for a value in a
+    // head, listed above, and the input ends after a complete sequence.
+    let value = unsafe { mark.exit_str(bytes) };
+
+    Ok(Status::Complete(value))
 }
 
 // Only exceptional controls need this check. Keeping backslashes in the

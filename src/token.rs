@@ -50,7 +50,7 @@ const REASON_PHRASE_OCTET_MAP: [bool; 256] = byte_map!(
 /// > extension-method  =  token
 /// > ```
 #[inline]
-pub(crate) fn is_method_token(b: u8) -> bool {
+pub(crate) const fn is_method_token(b: u8) -> bool {
     TOKEN_MAP[b as usize]
 }
 
@@ -63,7 +63,7 @@ pub(crate) fn is_method_token(b: u8) -> bool {
 /// whitespace, controls, `DEL`, raw non-ASCII, and visible ASCII outside the
 /// RFC 2396 `reserved` / `unreserved` / `%` classes.
 #[inline]
-pub(crate) fn is_uri_token(b: u8) -> bool {
+pub(crate) const fn is_uri_token(b: u8) -> bool {
     URI_TOKEN_MAP[b as usize]
 }
 
@@ -80,7 +80,7 @@ pub(crate) fn is_uri_token(b: u8) -> bool {
 /// > header-name  =  token
 /// > ```
 #[inline]
-pub(crate) fn is_header_name_token(b: u8) -> bool {
+pub(crate) const fn is_header_name_token(b: u8) -> bool {
     TOKEN_MAP[b as usize]
 }
 
@@ -110,7 +110,7 @@ pub(crate) fn is_header_name_token(b: u8) -> bool {
 /// separately without validating header-specific quoted-string or comment
 /// syntax. See the crate's header value policy.
 #[inline]
-pub(crate) fn is_header_value_ascii(b: u8) -> bool {
+pub(crate) const fn is_header_value_ascii(b: u8) -> bool {
     HEADER_VALUE_ASCII_MAP[b as usize]
 }
 
@@ -133,6 +133,6 @@ pub(crate) fn is_header_value_ascii(b: u8) -> bool {
 /// > escaped        =  "%" HEXDIG HEXDIG
 /// > ```
 #[inline]
-pub(crate) fn is_reason_phrase_octet(b: u8) -> bool {
+pub(crate) const fn is_reason_phrase_octet(b: u8) -> bool {
     REASON_PHRASE_OCTET_MAP[b as usize]
 }
