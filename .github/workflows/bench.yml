@@ -1,20 +1,43 @@
 name: bench
 
-# Pull requests compare against their base. A squash merge lands the same
-# tree on `main`, so a push there is not benchmarked again. A release tag
-# compares against the release before it.
+# Pull requests compare against their base, and a push to an `rt/` branch
+# against where it left `main`. `ci` only runs on pull requests, so an
+# optimization branch can be measured on every push before it has one. A
+# squash merge lands the same tree on `main`, so a push there is not
+# benchmarked again. A release tag compares against the release before it.
+#
+# Trailers in the head commit message adjust a branch or pull request run:
+#
+#   Bench-Filter: ^parse/header_value/   benchmarks to run instead of FILTER
+#   Bench-Base: HEAD~1                   base revision, relative to the head
+#
+# `Bench-Base: HEAD~1` compares one attempt against the previous one.
 on:
   pull_request:
+    paths:
+      - 'src/**'
+      - 'bench/**'
+      - 'Cargo.toml'
+      - '.github/workflows/bench.yml'
   push:
+    branches:
+      - 'rt/**'
+    paths:
+      - 'src/**'
+      - 'bench/**'
+      - 'Cargo.toml'
+      - '.github/workflows/bench.yml'
     tags:
       - '[0-9]+.[0-9]+.[0-9]+*'
 
 permissions:
   contents: read
 
-# A newer push to the same branch makes an in-flight comparison stale.
+# A newer push to the same branch makes an in-flight comparison stale. A
+# push and the pull request for it share the branch name, so only the later
+# of the two runs.
 concurrency:
-  group: bench-${{ github.ref }}
+  group: bench-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -64,10 +87,34 @@ jobs:
       - name: Pick the base commit
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+          # The head commit carries the trailers. A pull request checks out
+          # a merge commit, so its head is the branch tip instead.
+          head="${PR_HEAD_SHA:-$GITHUB_SHA}"
+          trailer() {
+            git log -1 --format="%(trailers:key=$1,valueonly)" "$head" |
+              head -n 1
+          }
+
+          if [[ "$GITHUB_REF_TYPE" != tag ]]; then
+            filter=$(trailer Bench-Filter)
+            if [[ -n "$filter" ]]; then
+              echo "FILTER=$filter" >> "$GITHUB_ENV"
+            fi
+            requested=$(trailer Bench-Base)
+          fi
+
+          if [[ -n "$requested" ]]; then
+            # `HEAD` names the head commit, not the merge commit.
+            base=$(git rev-parse --verify "${requested/#HEAD/$head}^{commit}")
+            label="$requested ($base)"
+          elif [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
             base="$PR_BASE_SHA"
             label="$base"
+          elif [[ "$GITHUB_REF_TYPE" == branch ]]; then
+            base=$(git merge-base origin/main "$head")
+            label="main ($base)"
           else
             # The highest release below this tag. Only `x.y.z` tags count
             # as a base, so a pre-release never is one.
@@ -127,6 +174,8 @@ jobs:
           {
             echo "## Benchmarks on $TARGET against $BASE_LABEL"
             echo
+            echo "Filter: \`$FILTER\`"
+            echo
             echo '```'
             critcmp base head
             echo '```'
@@ -137,3 +186,18 @@ jobs:
             critcmp -t 5 base head || true
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+      # The baselines as JSON, so the targets can be compared side by side
+      # with `critcmp` after `gh run download`.
+      - name: Export the baselines
+        if: steps.base.outputs.ran == 'true'
+        working-directory: bench
+        run: |
+          mkdir -p ../bench-results
+          critcmp --export base > "../bench-results/$TARGET-base.json"
+          critcmp --export head > "../bench-results/$TARGET-head.json"
+      - name: Upload the baselines
+        if: steps.base.outputs.ran == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-${{ matrix.name }}
+          path: bench-results/
