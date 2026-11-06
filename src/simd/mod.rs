@@ -19,8 +19,18 @@ use crate::iter::Bytes;
 
 /// Advances `bytes` over ASCII header value bytes, stopping at the first byte
 /// that the header value parser must look at.
+///
+/// The first block is SWAR. A value often ends within it, and the parser
+/// enters the scan again after each non-ASCII character and escaped control.
+/// On aarch64, moving a NEON mask to a general register cost more than a whole
+/// SWAR block there: `header_value/typical` took 35% longer and
+/// `header_value/utf8/mixed` 95% longer than with SWAR alone.
 #[inline(always)]
 pub(crate) fn match_header_value_vectored(bytes: &mut Bytes<'_>) {
+    if !swar::match_header_value_first_block(bytes) {
+        return;
+    }
+
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     if !neon::match_header_value(bytes) {
         return;

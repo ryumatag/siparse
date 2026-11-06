@@ -59,6 +59,22 @@ pub(crate) fn match_header_name_vectored(bytes: &mut Bytes<'_>) {
     unsafe { bytes.advance(n) };
 }
 
+/// Advances `bytes` over one block of ASCII header value bytes. Returns `true`
+/// if the whole block matched or fewer than `BLOCK_SIZE` bytes remain, so the
+/// scan should go on.
+#[inline(always)]
+pub(super) fn match_header_value_first_block(bytes: &mut Bytes<'_>) -> bool {
+    let Some(block) = bytes.peek_n::<BLOCK_SIZE>() else {
+        return true;
+    };
+    let n = match_header_value_block(block);
+
+    // SAFETY: `n <= BLOCK_SIZE`, and `peek_n` saw a full block.
+    unsafe { bytes.advance(n) };
+
+    n == BLOCK_SIZE
+}
+
 #[inline(always)]
 pub(super) fn match_header_value_vectored(bytes: &mut Bytes<'_>) {
     while let Some(block) = bytes.peek_n::<BLOCK_SIZE>() {
