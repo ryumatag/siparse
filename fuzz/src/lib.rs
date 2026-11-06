@@ -1,5 +1,5 @@
 /*!
-Public API fuzzing for `siparse`.
+Public API fuzzing for siparse.
 
 A smoke run with AddressSanitizer and bounded input size:
 

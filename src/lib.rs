@@ -1,5 +1,5 @@
 /*!
-`siparse` is a syntactic parser for SIP message heads. It parses the
+siparse is a syntactic parser for SIP message heads. It parses the
 request-line or status-line and the header rows that follow.
 
 It does not perform semantic decoding. Header names are not normalized, compact
@@ -128,7 +128,7 @@ assert_eq!(values[0], "a84b4c76e66710@pc33.example.com");
 # Ok::<(), siparse::Error>(())
 ```
 
-`siparse` leaves this conversion to the caller so that it stays free of
+siparse leaves this conversion to the caller so that it stays free of
 transport and buffer-type dependencies.
 
 [`bytes`]: https://docs.rs/bytes
@@ -207,7 +207,7 @@ validation pass.
 # Crate features
 
 * **std** (enabled by default) - Implements `std::error::Error` for [`Error`].
-  Without it, `siparse` is `no_std` and does not use `alloc`.
+  Without it, siparse is `no_std` and does not use `alloc`.
 
 A `__bench` feature exists for the benchmark crate in this repository. It is
 unstable and not part of the public API.
