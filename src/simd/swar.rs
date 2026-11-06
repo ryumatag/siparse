@@ -60,7 +60,7 @@ pub(crate) fn match_header_name_vectored(bytes: &mut Bytes<'_>) {
 }
 
 #[inline(always)]
-pub(crate) fn match_header_value_vectored(bytes: &mut Bytes<'_>) {
+pub(super) fn match_header_value_vectored(bytes: &mut Bytes<'_>) {
     while let Some(block) = bytes.peek_n::<BLOCK_SIZE>() {
         let n = match_header_value_block(block);
 
