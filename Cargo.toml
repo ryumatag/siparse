@@ -25,7 +25,9 @@ include = [
 
 [features]
 default = ["std"]
-std = []
+std = ["alloc"]
+# Allocates header storage with a run-time capacity.
+alloc = []
 # Exposes crate internals to the benchmark crate in `bench/`. Unstable, with
 # no semver guarantee. Not for use outside this repository.
 __bench = []

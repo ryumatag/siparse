@@ -1,6 +1,11 @@
+#[cfg(feature = "alloc")]
+use alloc::{
+    alloc::{alloc, handle_alloc_error, Layout},
+    boxed::Box,
+};
 use core::{
     fmt, iter::FusedIterator, marker::PhantomData, mem::MaybeUninit,
-    ops::Deref, slice,
+    ops::Deref, ptr, slice,
 };
 
 use crate::{
@@ -19,13 +24,49 @@ pub type HeaderBuf<'buf, const N: usize> =
 /// Header row storage that the parser fills without initializing it first.
 ///
 /// Callers create a fixed-capacity [`HeaderBuf`] and pass it by mutable
-/// reference, which coerces to `&mut Headers`. The parser therefore does
-/// not depend on the capacity. The filled rows are read through `Deref` to
+/// reference, which coerces to `&mut Headers`. The parser therefore does not
+/// depend on the capacity. The filled rows are read through `Deref` to
 /// `[Header]`.
+///
+/// The capacity is the most rows a head may have. A head with more fails with
+/// [`ErrorKind::TooManyHeaders`](crate::ErrorKind::TooManyHeaders). To choose
+/// that limit at run time, [`limit`](Headers::limit) a `HeaderBuf` that is
+/// large enough, or allocate the storage with `Headers::with_capacity`
+/// (with the `alloc` feature).
 ///
 /// The storage holds tokens that borrow the input buffer, so it cannot be kept
 /// across a mutation of that buffer. Creating a new `HeaderBuf` for each parse
 /// costs nothing because its slots are left uninitialized.
+///
+/// # Example
+///
+/// A limit that comes from configuration, kept on the stack up to 100 rows:
+///
+/// ```
+/// use siparse::{HeaderBuf, Headers, RequestHead};
+///
+/// fn header_count(buf: &[u8], max_headers: usize) -> Result<usize, siparse::Error> {
+///     let mut stack = HeaderBuf::<100>::new();
+///     let rows: &mut Headers<'_> = stack.limit(max_headers);
+///     let mut head = RequestHead::new(rows);
+///     head.parse(buf)?;
+///     Ok(head.headers.len())
+/// }
+///
+/// let buf = b"OPTIONS sip:carol@chicago.example.com SIP/2.0\r\n\
+///             Max-Forwards: 70\r\n\
+///             Content-Length: 0\r\n\
+///             \r\n";
+/// assert_eq!(header_count(buf, 2).unwrap(), 2);
+/// assert_eq!(
+///     header_count(buf, 1).unwrap_err().kind(),
+///     siparse::ErrorKind::TooManyHeaders,
+/// );
+/// ```
+// `repr(C)` fixes the layout to `len` followed by `rows`, so `with_capacity`
+// can compute the size of an allocation that `Box` frees with the size it
+// derives from the value.
+#[repr(C)]
 pub struct Headers<'buf, R: ?Sized = [MaybeUninit<Header<'buf>>]> {
     /// INVARIANT: `len <= rows.len()` and `rows[..len]` is initialized.
     len: usize,
@@ -83,6 +124,20 @@ impl<'buf, const N: usize> HeaderBuf<'buf, N> {
             rows: [MaybeUninit::uninit(); N],
         }
     }
+
+    /// Returns this storage limited to `max_rows` header rows.
+    ///
+    /// This is [`Headers::limit`] for a `HeaderBuf`, which a method call does
+    /// not coerce to `Headers` by itself.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_rows` is greater than `N`.
+    #[inline]
+    pub fn limit(&mut self, max_rows: usize) -> &mut Headers<'buf> {
+        let headers: &mut Headers<'buf> = self;
+        headers.limit(max_rows)
+    }
 }
 
 impl<'buf, const N: usize> Default for HeaderBuf<'buf, N> {
@@ -109,6 +164,102 @@ impl<'buf, const N: usize> Deref for HeaderBuf<'buf, N> {
 }
 
 impl<'buf> Headers<'buf> {
+    /// Allocates storage for up to `capacity` header rows.
+    ///
+    /// Use this when the row limit is only known at run time and may exceed
+    /// what fits on the stack. The slots are left uninitialized, so the
+    /// allocation is the only cost. Since the rows borrow the input buffer,
+    /// the storage cannot be reused for a different buffer and is allocated
+    /// once per parse.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use siparse::{Headers, RequestHead};
+    ///
+    /// let buf = b"OPTIONS sip:carol@chicago.example.com SIP/2.0\r\n\
+    ///             Max-Forwards: 70\r\n\
+    ///             \r\n";
+    /// let max_headers = 500;
+    ///
+    /// let mut headers = Headers::with_capacity(max_headers);
+    /// let mut head = RequestHead::new(&mut headers);
+    /// head.parse(buf)?;
+    ///
+    /// assert_eq!(head.headers.capacity(), 500);
+    /// assert_eq!(head.headers[0].name, "Max-Forwards");
+    /// # Ok::<(), siparse::Error>(())
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the size of the storage overflows `isize::MAX`.
+    #[cfg(feature = "alloc")]
+    pub fn with_capacity(capacity: usize) -> Box<Headers<'buf>> {
+        // The `repr(C)` layout of `Headers`. `PhantomData` adds nothing.
+        let layout = Layout::new::<usize>()
+            .extend(
+                Layout::array::<MaybeUninit<Header<'buf>>>(capacity)
+                    .expect("header storage size overflows `isize::MAX`"),
+            )
+            .expect("header storage size overflows `isize::MAX`")
+            .0
+            .pad_to_align();
+
+        // SAFETY: `layout` has a nonzero size, since it holds `len`.
+        let raw = unsafe { alloc(layout) };
+        if raw.is_null() {
+            handle_alloc_error(layout);
+        }
+        // The slice metadata of the tail is the metadata of the `Headers`
+        // pointer.
+        let headers = ptr::slice_from_raw_parts_mut(
+            raw.cast::<MaybeUninit<Header<'buf>>>(),
+            capacity,
+        ) as *mut Headers<'buf>;
+        // SAFETY: `headers` points to a fresh allocation of `layout`, which
+        // is the layout of a `Headers` with `capacity` rows, so the size and
+        // alignment `Box` frees it with match. Setting `len` to 0 upholds
+        // the invariant while every row is uninitialized.
+        unsafe {
+            ptr::addr_of_mut!((*headers).len).write(0);
+            Box::from_raw(headers)
+        }
+    }
+
+    /// Returns this storage limited to `max_rows` header rows.
+    ///
+    /// The returned storage uses the first `max_rows` slots of this one, so a
+    /// stack buffer sized for the largest limit can serve any smaller limit
+    /// chosen at run time. A head with more rows than `max_rows` fails with
+    /// [`ErrorKind::TooManyHeaders`](crate::ErrorKind::TooManyHeaders).
+    ///
+    /// Rows already filled beyond `max_rows` are dropped from this storage.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_rows` is greater than [`capacity`](Headers::capacity).
+    #[inline]
+    pub fn limit(&mut self, max_rows: usize) -> &mut Headers<'buf> {
+        assert!(
+            max_rows <= self.capacity(),
+            "header row limit {max_rows} exceeds the capacity {}",
+            self.capacity(),
+        );
+        self.len = self.len.min(max_rows);
+        // The slice metadata of the tail is the metadata of the `Headers`
+        // pointer, so shortening it shortens `rows`.
+        let limited = ptr::slice_from_raw_parts_mut(
+            (self as *mut Headers<'buf>).cast::<MaybeUninit<Header<'buf>>>(),
+            max_rows,
+        ) as *mut Headers<'buf>;
+        // SAFETY: `limited` covers `len` and the first `max_rows` rows of
+        // `self`, which lie inside it since `max_rows <= rows.len()`. It is
+        // borrowed from `self` for the returned lifetime. `len <= max_rows`
+        // holds, and `rows[..len]` is still initialized.
+        unsafe { &mut *limited }
+    }
+
     /// Returns the maximum number of header rows the storage can hold.
     #[inline]
     pub fn capacity(&self) -> usize {
@@ -155,13 +306,13 @@ impl<'buf> Header<'buf> {
     ///
     /// A fold is a `CRLF` followed by `SP` or `HTAB`. Each item is the text
     /// between two folds, without the `CRLF` and the whitespace that starts
-    /// the next line. [RFC 3261 section 7.3.1] treats a fold as a single
-    /// `SP`, so joining the items with one `SP` gives the unfolded value.
-    /// The items borrow from the input buffer, so this does not allocate.
+    /// the next line. [RFC 3261 section 7.3.1] treats a fold as a single `SP`,
+    /// so joining the items with one `SP` gives the unfolded value. The items
+    /// borrow from the input buffer, so this does not allocate.
     ///
-    /// Whitespace before a fold stays at the end of its line, just as the
-    /// RFC keeps it in the unfolded value. A value without folds, including
-    /// an empty one, yields itself as its only line.
+    /// Whitespace before a fold stays at the end of its line, just as the RFC
+    /// keeps it in the unfolded value. A value without folds, including an
+    /// empty one, yields itself as its only line.
     ///
     /// The parser only stores `CRLF` in a value as part of a fold. For a
     /// `Header` built by hand, this splits at every `CRLF`.

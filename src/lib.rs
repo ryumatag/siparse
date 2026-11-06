@@ -206,8 +206,11 @@ validation pass.
 
 # Crate features
 
-* **std** (enabled by default) - Implements `std::error::Error` for [`Error`].
-  Without it, siparse is `no_std` and does not use `alloc`.
+* **`std`** (enabled by default) - Implements `std::error::Error` for [`Error`].
+  Implies `alloc`. Without it, siparse is `no_std`.
+* **`alloc`** (enabled by `std`) - Adds `Headers::with_capacity`, which
+  allocates header storage whose capacity is chosen at run time. Parsing itself
+  never allocates.
 
 A `__bench` feature exists for the benchmark crate in this repository. It is
 unstable and not part of the public API.
@@ -227,6 +230,8 @@ unstable and not part of the public API.
 )]
 #![warn(missing_docs, missing_debug_implementations)]
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
 #[cfg(any(test, feature = "std"))]
 extern crate std;
 

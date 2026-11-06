@@ -1127,6 +1127,113 @@ mod tests {
         assert_eq!(head.headers[0].name, "Via");
     }
 
+    const THREE_ROWS: &[u8] = b"INVITE sip:bob@example.com SIP/2.0\r\n\
+                                Via: SIP/2.0/UDP host.example.com\r\n\
+                                Max-Forwards: 70\r\n\
+                                Content-Length: 0\r\n\
+                                \r\n";
+
+    #[test]
+    fn limit_rejects_rows_beyond_the_limit() {
+        let mut headers = HeaderBuf::<N_HEADERS>::new();
+        let rows = headers.limit(2);
+        assert_eq!(rows.capacity(), 2);
+        let mut head = RequestHead::new(rows);
+
+        let err = head.parse(THREE_ROWS).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::TooManyHeaders);
+        assert_eq!(head.headers.len(), 2);
+        assert_eq!(head.headers[1].name, "Max-Forwards");
+    }
+
+    #[test]
+    fn limit_at_the_row_count_parses() {
+        let mut headers = HeaderBuf::<N_HEADERS>::new();
+        let mut head = RequestHead::new(headers.limit(3));
+
+        let head_end = head.parse(THREE_ROWS).unwrap().unwrap();
+
+        assert_eq!(head_end, THREE_ROWS.len());
+        assert_eq!(head.headers.len(), 3);
+    }
+
+    // The limit drops filled rows past it, and the full storage keeps the
+    // rows that remain.
+    #[test]
+    fn limit_truncates_filled_rows() {
+        let mut headers = HeaderBuf::<N_HEADERS>::new();
+        RequestHead::new(&mut headers).parse(THREE_ROWS).unwrap();
+        assert_eq!(headers.len(), 3);
+
+        assert_eq!(headers.limit(N_HEADERS).len(), 3);
+        let limited = headers.limit(1);
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited.limit(0).len(), 0);
+        assert!(headers.is_empty());
+        assert_eq!((&mut headers as &mut Headers<'_>).capacity(), N_HEADERS);
+    }
+
+    #[test]
+    #[should_panic(expected = "header row limit 2 exceeds the capacity 1")]
+    fn limit_above_the_capacity_panics() {
+        let mut headers = HeaderBuf::<1>::new();
+        headers.limit(2);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn with_capacity_parses_up_to_the_capacity() {
+        let mut headers = Headers::with_capacity(3);
+        assert_eq!(headers.capacity(), 3);
+        assert!(headers.is_empty());
+        let mut head = RequestHead::new(&mut headers);
+
+        let head_end = head.parse(THREE_ROWS).unwrap().unwrap();
+
+        assert_eq!(head_end, THREE_ROWS.len());
+        assert_eq!(head.headers[2].value, "0");
+
+        let mut headers = Headers::with_capacity(2);
+        let mut head = RequestHead::new(&mut headers);
+        let err = head.parse(THREE_ROWS).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::TooManyHeaders);
+        assert_eq!(head.headers.len(), 2);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn with_capacity_of_zero_rejects_any_row() {
+        let mut headers = Headers::with_capacity(0);
+        let mut head = RequestHead::new(&mut headers);
+
+        let err = head.parse(THREE_ROWS).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::TooManyHeaders);
+        assert!(head.headers.is_empty());
+    }
+
+    // `Box` frees the storage with the layout it derives from the value, so
+    // that layout must match the one `with_capacity` allocated with. The
+    // fixed-size `HeaderBuf` gives the layout the compiler computes.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn with_capacity_matches_the_compiler_layout() {
+        use core::mem::{align_of_val, size_of_val};
+
+        fn check<const N: usize>() {
+            let boxed = Headers::with_capacity(N);
+            let fixed = HeaderBuf::<N>::new();
+            let fixed: &Headers<'_> = &fixed;
+            assert_eq!(size_of_val(&*boxed), size_of_val(fixed));
+            assert_eq!(align_of_val(&*boxed), align_of_val(fixed));
+        }
+        check::<0>();
+        check::<1>();
+        check::<3>();
+        check::<100>();
+    }
+
     // Every parse resets the head first, so the same head can be reused for
     // the next message, and a `Partial` leaves nothing from earlier calls.
     #[test]
