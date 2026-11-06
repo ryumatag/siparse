@@ -3,7 +3,7 @@ use std::hint::black_box as bb;
 use criterion::Criterion;
 use siparse::{AnyHead, HeaderBuf, Status};
 
-use crate::benchmark;
+use crate::{benchmark, corpus::Profile};
 
 pub(super) fn parse(c: &mut Criterion) {
     corpus(c);
@@ -13,8 +13,8 @@ pub(super) fn parse(c: &mut Criterion) {
 // them. Compare against the sum of the request and response corpus
 // benchmarks to see what deciding the kind costs.
 fn corpus(c: &mut Criterion) {
-    let requests = crate::corpus::requests();
-    let responses = crate::corpus::responses();
+    let requests = crate::corpus::requests(Profile::Edge);
+    let responses = crate::corpus::responses(Profile::Edge);
     let messages: Vec<_> = requests
         .iter()
         .zip(&responses)

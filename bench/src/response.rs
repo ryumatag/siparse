@@ -3,7 +3,7 @@ use std::hint::black_box as bb;
 use criterion::Criterion;
 use siparse::{HeaderBuf, ResponseHead, Status};
 
-use crate::benchmark;
+use crate::{benchmark, corpus::Profile};
 
 pub(super) fn parse(c: &mut Criterion) {
     fixed_shape(c);
@@ -58,20 +58,25 @@ fn fixed_shape(c: &mut Criterion) {
 // Responses that vary in status, header set and value lengths. See
 // `corpus.rs` for why this matters next to the fixed shapes above.
 fn corpus(c: &mut Criterion) {
-    let messages = crate::corpus::responses();
-    let total_bytes = messages.iter().map(|m| m.len() as u64).sum();
+    for (profile, id) in [
+        (Profile::Edge, "parse/response_head/corpus"),
+        (Profile::Carrier, "parse/response_head/corpus/carrier"),
+    ] {
+        let messages = crate::corpus::responses(profile);
+        let total_bytes = messages.iter().map(|m| m.len() as u64).sum();
 
-    let mut headers = HeaderBuf::<32>::new();
-    let mut head = ResponseHead::new(&mut headers);
-    benchmark(c, "parse/response_head/corpus", total_bytes, |b| {
-        b.iter(|| {
-            for msg in &messages {
-                let status = head.parse(bb(msg)).unwrap();
-                let Status::Complete(end) = bb(status) else {
-                    panic!("expected Complete, got Partial");
-                };
-                assert_eq!(end, msg.len());
-            }
+        let mut headers = HeaderBuf::<64>::new();
+        let mut head = ResponseHead::new(&mut headers);
+        benchmark(c, id, total_bytes, |b| {
+            b.iter(|| {
+                for msg in &messages {
+                    let status = head.parse(bb(msg)).unwrap();
+                    let Status::Complete(end) = bb(status) else {
+                        panic!("expected Complete, got Partial");
+                    };
+                    assert_eq!(end, msg.len());
+                }
+            });
         });
-    });
+    }
 }

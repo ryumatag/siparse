@@ -9,6 +9,13 @@
 //! The corpus deliberately stays small enough to remain in cache. A server
 //! parses a head right after `recv` has written it, so warm input data is
 //! the realistic case.
+//!
+//! Two profiles share the generator. `Edge` heads look like those between
+//! user agents and a proxy, about 470 bytes on average. `Carrier` heads look
+//! like those inside an operator or IMS core, where proxies stack `Via` and
+//! `Record-Route` rows and add credentials and `P-` headers. They run to 1 to
+//! 2 KB, with many values longer than a SWAR block or two, which is where a
+//! wider scan would pay off.
 
 use std::fmt::Write as _;
 
@@ -21,19 +28,46 @@ use rand::{
 /// Number of heads in each corpus.
 const SIZE: usize = 512;
 
+/// The kind of traffic a corpus imitates. See the module docs.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Profile {
+    Edge,
+    Carrier,
+}
+
 /// Returns the request heads of the corpus.
-pub(crate) fn requests() -> Vec<Vec<u8>> {
-    let mut rng = StdRng::seed_from_u64(1);
-    (0..SIZE).map(|_| request(&mut rng).into_bytes()).collect()
+pub(crate) fn requests(profile: Profile) -> Vec<Vec<u8>> {
+    let mut rng = StdRng::seed_from_u64(seed(1, profile));
+    (0..size(profile))
+        .map(|_| request(&mut rng, profile).into_bytes())
+        .collect()
 }
 
 /// Returns the response heads of the corpus.
-pub(crate) fn responses() -> Vec<Vec<u8>> {
-    let mut rng = StdRng::seed_from_u64(2);
-    (0..SIZE).map(|_| response(&mut rng).into_bytes()).collect()
+pub(crate) fn responses(profile: Profile) -> Vec<Vec<u8>> {
+    let mut rng = StdRng::seed_from_u64(seed(2, profile));
+    (0..size(profile))
+        .map(|_| response(&mut rng, profile).into_bytes())
+        .collect()
 }
 
-fn request(rng: &mut StdRng) -> String {
+fn seed(seed: u64, profile: Profile) -> u64 {
+    match profile {
+        Profile::Edge => seed,
+        Profile::Carrier => seed + 100,
+    }
+}
+
+// Carrier heads are about three times longer. Half as many keep the corpus
+// at a similar size in cache.
+fn size(profile: Profile) -> usize {
+    match profile {
+        Profile::Edge => SIZE,
+        Profile::Carrier => SIZE / 2,
+    }
+}
+
+fn request(rng: &mut StdRng, profile: Profile) -> String {
     // Rough proportions of a busy SIP edge, plus one extension method.
     const METHODS: &[(&str, u32)] = &[
         ("INVITE", 20),
@@ -58,12 +92,26 @@ fn request(rng: &mut StdRng) -> String {
     // Only in-dialog requests carry a `To` tag.
     let to_tag = rng.random_bool(0.3);
 
+    let mut rows = vec![max_forwards];
+    if profile == Profile::Carrier && !matches!(method, "ACK" | "CANCEL") {
+        rows.push(format!(
+            "Authorization: Digest username=\"{}\", realm=\"{}\", \
+             nonce=\"{}\", uri=\"{uri}\", response=\"{}\", \
+             algorithm=MD5, cnonce=\"{}\", qop=auth, nc=00000001",
+            user(rng),
+            host(rng),
+            token(rng, 32, 48),
+            token(rng, 32, 32),
+            token(rng, 16, 16),
+        ));
+    }
+
     let mut head = format!("{method} {uri} SIP/2.0\r\n");
-    head += &header_block(rng, method, to_tag, vec![max_forwards]);
+    head += &header_block(rng, method, to_tag, rows, profile);
     head
 }
 
-fn response(rng: &mut StdRng) -> String {
+fn response(rng: &mut StdRng, profile: Profile) -> String {
     const STATUSES: &[(&str, u32)] = &[
         ("100 Trying", 10),
         ("180 Ringing", 15),
@@ -95,7 +143,8 @@ fn response(rng: &mut StdRng) -> String {
 
     let mut head = format!("SIP/2.0 {status}\r\n");
     // Every response except `100 Trying` echoes a `To` tag.
-    head += &header_block(rng, method, !status.starts_with("100"), extra);
+    head +=
+        &header_block(rng, method, !status.starts_with("100"), extra, profile);
     head
 }
 
@@ -108,6 +157,7 @@ fn header_block(
     method: &str,
     to_tag: bool,
     mut rows: Vec<String>,
+    profile: Profile,
 ) -> String {
     let compact = rng.random_bool(0.2);
     let name = |full, short| if compact { short } else { full };
@@ -120,7 +170,34 @@ fn header_block(
     if rng.random_bool(0.7) {
         rows.push(format!("{}: {}", name("Contact", "m"), contact(rng)));
     }
-    if rng.random_bool(0.2) {
+    if profile == Profile::Carrier {
+        // Each proxy on the path records itself with its own parameters.
+        for _ in 0..rng.random_range(2..=4) {
+            rows.push(format!(
+                "Record-Route: <sip:{};lr;ftag={};did={}>",
+                host(rng),
+                token(rng, 8, 12),
+                token(rng, 10, 16),
+            ));
+        }
+        rows.push(format!(
+            "P-Charging-Vector: icid-value={};icid-generated-at=192.0.2.{};\
+             orig-ioi={}",
+            token(rng, 32, 40),
+            rng.random_range(1..=254),
+            host(rng),
+        ));
+        rows.push(format!(
+            "P-Access-Network-Info: 3GPP-E-UTRAN-FDD;\
+             utran-cell-id-3gpp=44010{}",
+            rng.random_range(100_000_000..=999_999_999u32),
+        ));
+        rows.push(
+            "Accept-Contact: *;+g.3gpp.icsi-ref=\
+             \"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel\""
+                .to_owned(),
+        );
+    } else if rng.random_bool(0.2) {
         for _ in 0..rng.random_range(1..=2) {
             rows.push(format!("Record-Route: <sip:{};lr>", host(rng)));
         }
@@ -159,7 +236,7 @@ fn header_block(
         let subject = SUBJECTS.choose(rng).unwrap();
         rows.push(format!("{}: {subject}", name("Subject", "s")));
     }
-    if rng.random_bool(0.2) {
+    if profile == Profile::Carrier || rng.random_bool(0.2) {
         rows.push(format!("P-Asserted-Identity: {}", name_addr(rng, false)));
     }
 
@@ -173,7 +250,11 @@ fn header_block(
     rows.shuffle(rng);
 
     let mut block = String::new();
-    for _ in 0..rng.random_range(1..=3) {
+    let vias = match profile {
+        Profile::Edge => 1..=3,
+        Profile::Carrier => 3..=6,
+    };
+    for _ in 0..rng.random_range(vias) {
         let _ = write!(block, "{}: {}\r\n", name("Via", "v"), via(rng));
     }
     for row in rows {
