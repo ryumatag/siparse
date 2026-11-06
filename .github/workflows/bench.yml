@@ -1,23 +1,115 @@
 name: bench
 
-# Pull requests compare against their base. A squash merge lands the same
-# tree on `main`, so a push there is not benchmarked again. A release tag
-# compares against the release before it.
+# Pull requests compare against their base, and a push to an `rt/` branch
+# against where it left `main`. `ci` only runs on pull requests, so an
+# optimization branch can be measured on every push before it has one. A
+# squash merge lands the same tree on `main`, so a push there is not
+# benchmarked again. A release tag compares against the release before it.
+#
+# Trailers in the head commit message adjust a branch or pull request run:
+#
+#   Bench-Filter: ^parse/header_value/   benchmarks to run instead of FILTER
+#   Bench-Base: HEAD~1                   base revision, relative to the head
+#   Bench-Targets: aarch64 x86_64        targets to run, or `all`
+#
+# `Bench-Base: HEAD~1` compares one attempt against the previous one.
 on:
   pull_request:
+    paths:
+      - 'src/**'
+      - 'bench/**'
+      - 'Cargo.toml'
+      - '.github/workflows/bench.yml'
   push:
+    branches:
+      - 'rt/**'
+    paths:
+      - 'src/**'
+      - 'bench/**'
+      - 'Cargo.toml'
+      - '.github/workflows/bench.yml'
     tags:
       - '[0-9]+.[0-9]+.[0-9]+*'
 
 permissions:
   contents: read
 
-# A newer push to the same branch makes an in-flight comparison stale.
+# A newer push to the same branch makes an in-flight comparison stale. A
+# push and the pull request for it share the branch name, so only the later
+# of the two runs.
 concurrency:
-  group: bench-${{ github.ref }}
+  group: bench-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
+  # Reads the trailers and picks the targets, so the matrix can depend on
+  # them.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.plan.outputs.targets }}
+      filter: ${{ steps.plan.outputs.filter }}
+      base: ${{ steps.plan.outputs.base }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          # A pull request checks out a merge commit, but the trailers are
+          # on the branch tip.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Read the trailers
+        id: plan
+        run: |
+          # The targets a SIMD path must serve. `default` marks the ones run
+          # without `Bench-Targets`.
+          #
+          # - x86_64: the default build, which only assumes SSE2. A SIMD path
+          #   that needs more has to detect it at run time to run here.
+          # - x86_64-native: the same runner, built for its own CPU. The
+          #   difference against the default build is what run-time
+          #   detection costs or misses. The CPU differs between runners,
+          #   but base and head share one.
+          # - aarch64: NEON is part of the aarch64 baseline, so one build is
+          #   enough.
+          # - aarch64-apple: an Apple core. Its runners moved by up to 12%
+          #   between identical builds, so it only runs on request.
+          all='[
+            {"name": "x86_64", "os": "ubuntu-latest", "default": true},
+            {"name": "x86_64-native", "os": "ubuntu-latest",
+             "rustflags": "-C target-cpu=native", "default": true},
+            {"name": "aarch64", "os": "ubuntu-24.04-arm", "default": true},
+            {"name": "aarch64-apple", "os": "macos-latest", "default": false}
+          ]'
+
+          trailer() {
+            if [[ "$GITHUB_REF_TYPE" != tag ]]; then
+              git log -1 --format="%(trailers:key=$1,valueonly)" | head -n 1
+            fi
+          }
+
+          requested=$(trailer Bench-Targets)
+          if [[ -z "$requested" ]]; then
+            targets=$(jq -c 'map(select(.default))' <<< "$all")
+          elif [[ "$requested" == all ]]; then
+            targets=$(jq -c . <<< "$all")
+          else
+            names=$(jq -Rc '[splits("[, ]+") | select(. != "")]' <<< "$requested")
+            unknown=$(jq -r --argjson all "$all" \
+              '. - ($all | map(.name)) | join(" ")' <<< "$names")
+            if [[ -n "$unknown" ]]; then
+              echo "::error::Unknown Bench-Targets: $unknown"
+              exit 1
+            fi
+            targets=$(jq -c --argjson names "$names" \
+              'map(select(.name | IN($names[])))' <<< "$all")
+          fi
+
+          {
+            echo "targets=$targets"
+            echo "filter=$(trailer Bench-Filter)"
+            echo "base=$(trailer Bench-Base)"
+          } >> "$GITHUB_OUTPUT"
+
   # Compares the head benchmarks against a base commit. Shared runners are
   # noisy, so the result is informational and never fails the job. Clippy
   # and the benchmark assertions run in `ci`.
@@ -27,33 +119,19 @@ jobs:
   # paths for x86_64 and aarch64 are planned.
   compare:
     name: compare (${{ matrix.name }})
+    needs: plan
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # The default x86_64 build, which only assumes SSE2. A SIMD path
-          # that needs more has to detect it at run time to run here.
-          - name: x86_64
-            os: ubuntu-latest
-          # The same runner, built for its own CPU. The difference against
-          # the default build is what run-time detection costs or misses.
-          # The CPU differs between runners, but base and head share one.
-          - name: x86_64-native
-            os: ubuntu-latest
-            rustflags: -C target-cpu=native
-          # NEON is part of the aarch64 baseline, so one build is enough.
-          - name: aarch64
-            os: ubuntu-24.04-arm
-          - name: aarch64-apple
-            os: macos-latest
+        include: ${{ fromJSON(needs.plan.outputs.targets) }}
     env:
       TARGET: ${{ matrix.name }}
       RUSTFLAGS: ${{ matrix.rustflags }}
       # The public head benchmarks are the ones used for decisions. Running
       # the whole suite twice would take far longer.
-      FILTER: ^parse/(request|response)_head/
+      FILTER: ${{ needs.plan.outputs.filter || '^parse/(request|response)_head/' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -64,10 +142,23 @@ jobs:
       - name: Pick the base commit
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REQUESTED: ${{ needs.plan.outputs.base }}
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+          # A pull request checks out a merge commit, so its head is the
+          # branch tip instead.
+          head="${PR_HEAD_SHA:-$GITHUB_SHA}"
+
+          if [[ -n "$REQUESTED" ]]; then
+            # `HEAD` names the head commit, not the merge commit.
+            base=$(git rev-parse --verify "${REQUESTED/#HEAD/$head}^{commit}")
+            label="$REQUESTED ($base)"
+          elif [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
             base="$PR_BASE_SHA"
             label="$base"
+          elif [[ "$GITHUB_REF_TYPE" == branch ]]; then
+            base=$(git merge-base origin/main "$head")
+            label="main ($base)"
           else
             # The highest release below this tag. Only `x.y.z` tags count
             # as a base, so a pre-release never is one.
@@ -127,6 +218,8 @@ jobs:
           {
             echo "## Benchmarks on $TARGET against $BASE_LABEL"
             echo
+            echo "Filter: \`$FILTER\`"
+            echo
             echo '```'
             critcmp base head
             echo '```'
@@ -137,3 +230,18 @@ jobs:
             critcmp -t 5 base head || true
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+      # The baselines as JSON, so the targets can be compared side by side
+      # with `critcmp` after `gh run download`.
+      - name: Export the baselines
+        if: steps.base.outputs.ran == 'true'
+        working-directory: bench
+        run: |
+          mkdir -p ../bench-results
+          critcmp --export base > "../bench-results/$TARGET-base.json"
+          critcmp --export head > "../bench-results/$TARGET-head.json"
+      - name: Upload the baselines
+        if: steps.base.outputs.ran == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-${{ matrix.name }}
+          path: bench-results/
