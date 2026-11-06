@@ -62,6 +62,7 @@ pub(crate) fn match_header_name_vectored(bytes: &mut Bytes<'_>) {
 /// Advances `bytes` over one block of ASCII header value bytes. Returns `true`
 /// if the whole block matched or fewer than `BLOCK_SIZE` bytes remain, so the
 /// scan should go on.
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
 #[inline(always)]
 pub(super) fn match_header_value_first_block(bytes: &mut Bytes<'_>) -> bool {
     let Some(block) = bytes.peek_n::<BLOCK_SIZE>() else {
