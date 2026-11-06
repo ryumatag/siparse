@@ -23,22 +23,20 @@ use crate::iter::Bytes;
 pub(crate) fn match_header_value_vectored(bytes: &mut Bytes<'_>) {
     // On aarch64 the first block is SWAR. A value often ends within it, and
     // the parser enters the scan again after each non-ASCII character and
-    // escaped control. Moving a NEON mask to a general register cost more
-    // than a whole SWAR block there. Starting with NEON made
-    // `header_value/typical` 35% and `header_value/utf8/mixed` 95% slower
-    // than SWAR alone. On x86_64, `pmovmskb` is cheap, and starting with SWAR
-    // made `request_head/typical` slower again (-6% instead of -12% against
-    // SWAR alone).
+    // escaped control. Starting with NEON made `header_value/typical` 35% and
+    // `header_value/utf8/mixed` 95% slower than SWAR alone. NEON then skips
+    // whole blocks, and SWAR finds the stopping byte.
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
-    if !swar::match_header_value_first_block(bytes)
-        || !neon::match_header_value(bytes)
     {
-        return;
+        if !swar::match_header_value_first_block(bytes) {
+            return;
+        }
+        neon::skip_header_value_blocks(bytes);
     }
+    // On x86_64, `pmovmskb` is cheap, and starting with SWAR made
+    // `request_head/typical` slower (-6% instead of -12% against SWAR alone).
     #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
-    if !sse2::match_header_value(bytes) {
-        return;
-    }
+    sse2::skip_header_value_blocks(bytes);
 
     swar::match_header_value_vectored(bytes);
 }

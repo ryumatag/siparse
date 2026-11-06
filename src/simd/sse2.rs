@@ -10,30 +10,22 @@ use crate::iter::Bytes;
 
 const BLOCK_SIZE: usize = 16;
 
-/// Advances `bytes` over whole 16-byte blocks of ASCII header value bytes.
-///
-/// Returns `false` once a block stops the scan, with the cursor on the
-/// stopping byte. Returns `true` when fewer than 16 bytes remain, for the
-/// SWAR scan to finish.
+/// Advances `bytes` over whole 16-byte blocks of ASCII header value bytes, and
+/// stops at the start of the first block that holds a stopping byte, or when
+/// fewer than 16 bytes remain. The SWAR scan finds the byte itself, with
+/// branches that usually predict, so the next row's loads need not wait for
+/// a bit count. See `neon::skip_header_value_blocks`.
 #[inline(always)]
-pub(super) fn match_header_value(bytes: &mut Bytes<'_>) -> bool {
+pub(super) fn skip_header_value_blocks(bytes: &mut Bytes<'_>) {
     while let Some(block) = bytes.peek_n::<BLOCK_SIZE>() {
         // SAFETY: SSE2 is part of the x86_64 baseline.
-        let stops = unsafe { header_value_stops(block) };
-        // The loop tests the mask itself and advances by a constant, so the
-        // next load does not wait for this block. See `swar::first_lane`.
-        if stops != 0 {
-            let lane = stops.trailing_zeros() as usize;
-            // SAFETY: `lane < BLOCK_SIZE`, and `peek_n` saw a full block.
-            unsafe { bytes.advance(lane) };
-            return false;
+        if unsafe { header_value_stops(block) } != 0 {
+            return;
         }
 
         // SAFETY: `peek_n` saw a full block.
         unsafe { bytes.advance(BLOCK_SIZE) };
     }
-
-    true
 }
 
 /// Returns a bit for each lane where an ASCII header value scan stops, lane 0
