@@ -212,6 +212,12 @@ fn scan_tail(predicate: impl Fn(u8) -> bool, bytes: &[u8]) -> usize {
 /// The scan looks for `CR` one block at a time and checks the three bytes
 /// after each one. A head has one `CR` per row, so the check runs once per row
 /// and the block scan does the rest of the work.
+///
+/// The SIMD scans test for a `CR` with another two bytes after it instead,
+/// which never stops before the end of a head. In 8-byte words the second
+/// load and compare cost more than the stops they save. Whole heads took 6
+/// to 25% longer on CI, so SWAR keeps this test. After SIMD it only sees the
+/// last block or two of a head.
 #[inline]
 pub(crate) fn find_head_end_vectored(bytes: &mut Bytes<'_>) -> bool {
     const CR: usize = uniform_block(b'\r');

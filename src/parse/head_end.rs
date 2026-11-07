@@ -66,6 +66,17 @@ const HEAD_END: &[u8] = b"\r\n\r\n";
 /// ```
 #[inline]
 pub fn find_head_end(buf: &[u8], scanned: usize) -> Option<usize> {
+    find_head_end_with(buf, scanned, simd::find_head_end_vectored)
+}
+
+/// [`find_head_end`] with the scan given, so the benchmarks can measure the
+/// SWAR scan alone.
+#[inline(always)]
+pub(crate) fn find_head_end_with(
+    buf: &[u8],
+    scanned: usize,
+    scan: fn(&mut Bytes<'_>) -> bool,
+) -> Option<usize> {
     assert!(scanned <= buf.len(), "scanned is past the end of the buffer");
 
     // The empty line can start no earlier than three bytes before the
@@ -73,8 +84,7 @@ pub fn find_head_end(buf: &[u8], scanned: usize) -> Option<usize> {
     let start = scanned.saturating_sub(HEAD_END.len() - 1);
     let mut bytes = Bytes::new(&buf[start..]);
 
-    simd::find_head_end_vectored(&mut bytes)
-        .then(|| start + bytes.pos() + HEAD_END.len())
+    scan(&mut bytes).then(|| start + bytes.pos() + HEAD_END.len())
 }
 
 #[cfg(test)]

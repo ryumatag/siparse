@@ -22,6 +22,7 @@ pub(crate) use self::{
 // Productions that `crate::bench` measures one at a time.
 #[cfg(feature = "__bench")]
 pub(crate) use self::{
+    head_end::find_head_end_with,
     header::{parse_header_name, parse_header_value},
     start_line::{parse_status_code, parse_version},
 };

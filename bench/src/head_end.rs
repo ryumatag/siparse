@@ -8,9 +8,14 @@ const HEAD_END: &[u8] = b"\r\n\r\n";
 
 type Find = fn(&[u8], usize) -> Option<usize>;
 
-/// The crate's SWAR search.
-fn swar(buf: &[u8], scanned: usize) -> Option<usize> {
+/// The crate's search, with SIMD where the target has it.
+fn simd(buf: &[u8], scanned: usize) -> Option<usize> {
     siparse::find_head_end(buf, scanned)
+}
+
+/// The crate's search with SWAR only, the fallback on other targets.
+fn swar(buf: &[u8], scanned: usize) -> Option<usize> {
+    siparse::bench::find_head_end_swar(buf, scanned)
 }
 
 /// One window at a time, with the same overlap rule.
@@ -30,8 +35,8 @@ fn memmem(buf: &[u8], scanned: usize) -> Option<usize> {
 }
 
 // `scalar` and `memmem` are yardsticks for `find_head_end`, not part of the
-// crate. They show whether the SWAR scan still earns its place against a
-// plain loop and a SIMD search on inputs of this size.
+// crate. They show whether the crate's scans still earn their place against a
+// plain loop and a general SIMD substring search on inputs of this size.
 pub(super) fn find(c: &mut Criterion) {
     const NAME: &str = "find/head_end";
 
@@ -56,8 +61,12 @@ pub(super) fn find(c: &mut Criterion) {
         ("partial", partial, 0, None),
         ("incremental", partial, partial.len() - 64, None),
     ];
-    let finds: [(&str, Find); _] =
-        [("swar", swar), ("scalar", scalar), ("memmem", memmem)];
+    let finds: [(&str, Find); _] = [
+        ("simd", simd),
+        ("swar", swar),
+        ("scalar", scalar),
+        ("memmem", memmem),
+    ];
 
     for (category, input, scanned, expected) in cases {
         let start = scanned.saturating_sub(HEAD_END.len() - 1);

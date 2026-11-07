@@ -9,14 +9,17 @@ mod sse2;
 mod swar;
 
 pub(super) use self::swar::{
-    find_head_end_vectored, match_digits_vectored, match_header_name_vectored,
+    match_digits_vectored, match_header_name_vectored,
     match_hostname_vectored, match_ipv6_vectored, match_qdtext_vectored,
     match_reason_phrase_ascii_vectored, match_token_vectored,
     match_uri_vectored,
 };
 
 #[cfg(feature = "__bench")]
-pub(crate) use self::swar::match_header_value_vectored as match_header_value_swar;
+pub(crate) use self::swar::{
+    find_head_end_vectored as find_head_end_swar,
+    match_header_value_vectored as match_header_value_swar,
+};
 use crate::iter::Bytes;
 
 /// Advances `bytes` over ASCII header value bytes, stopping at the first byte
@@ -43,6 +46,21 @@ pub(crate) fn match_header_value_vectored(bytes: &mut Bytes<'_>) {
     }
 
     swar::match_header_value_vectored(bytes);
+}
+
+/// Advances `bytes` to the first `\r\n\r\n` at or after the cursor and returns
+/// `true`, or returns `false` with the cursor in the last three bytes.
+///
+/// SSE2 or NEON skips the 16-byte blocks that cannot hold its start, and SWAR
+/// finds it in the block that can. In a head that block is the last one.
+#[inline]
+pub(crate) fn find_head_end_vectored(bytes: &mut Bytes<'_>) -> bool {
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    neon::skip_head_end_blocks(bytes);
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    sse2::skip_head_end_blocks(bytes);
+
+    swar::find_head_end_vectored(bytes)
 }
 
 #[cfg(test)]
@@ -87,6 +105,65 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Checks a head-end scan against a search of every window.
+    ///
+    /// Every string of `CR`, `LF`, and `a` up to 7 bytes long goes at every
+    /// offset of a run of `a`, which crosses the 8- and 16-byte blocks and
+    /// their 2-byte overlap. The buffer either ends right after the string,
+    /// for the tails, or runs on to 48 bytes. Miri gets strings up to 4 bytes.
+    fn assert_head_end_matches_reference(scan: fn(&mut Bytes<'_>) -> bool) {
+        const ALPHABET: [u8; 3] = *b"\r\na";
+        let max_len = if cfg!(miri) { 4 } else { 7 };
+
+        for len in 0..=max_len {
+            for code in 0..ALPHABET.len().pow(len as u32) {
+                let mut pattern = [0; 7];
+                let mut rest = code;
+                for b in &mut pattern[..len] {
+                    *b = ALPHABET[rest % ALPHABET.len()];
+                    rest /= ALPHABET.len();
+                }
+
+                for offset in 0..=LEN - len {
+                    let mut input = [b'a'; LEN];
+                    input[offset..offset + len]
+                        .copy_from_slice(&pattern[..len]);
+                    for end in [offset + len, LEN] {
+                        let input = &input[..end];
+                        let expected =
+                            input.windows(4).position(|w| w == b"\r\n\r\n");
+                        let mut bytes = Bytes::new(input);
+                        let found = scan(&mut bytes);
+
+                        match expected {
+                            Some(at) => {
+                                assert!(found, "{input:?}");
+                                assert_eq!(bytes.pos(), at, "{input:?}");
+                            }
+                            None => {
+                                assert!(!found, "{input:?}");
+                                assert!(
+                                    bytes.pos() >= end.saturating_sub(3),
+                                    "{input:?}",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn head_end_matches_reference() {
+        assert_head_end_matches_reference(find_head_end_vectored);
+    }
+
+    #[test]
+    fn swar_head_end_matches_reference() {
+        assert_head_end_matches_reference(swar::find_head_end_vectored);
     }
 
     // Two arbitrary bytes side by side catch a lane predicate that leaks

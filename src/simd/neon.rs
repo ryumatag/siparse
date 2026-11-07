@@ -2,9 +2,9 @@
 //! these need no run-time detection.
 
 use core::arch::aarch64::{
-    vbicq_u8, vceqq_u8, vcgeq_u8, vcltq_u8, vdupq_n_u8, vget_lane_u64,
-    vld1q_u8, vorrq_u8, vreinterpret_u64_u8, vreinterpretq_u16_u8,
-    vshrn_n_u16,
+    uint8x16_t, vandq_u8, vbicq_u8, vceqq_u8, vcgeq_u8, vcltq_u8, vdupq_n_u8,
+    vget_lane_u64, vld1q_u8, vorrq_u8, vreinterpret_u64_u8,
+    vreinterpretq_u16_u8, vshrn_n_u16,
 };
 
 use crate::iter::Bytes;
@@ -54,9 +54,57 @@ unsafe fn header_value_stops(block: [u8; BLOCK_SIZE]) -> u64 {
         let del_or_high = vcgeq_u8(x, vdupq_n_u8(0x7f));
         let stops = vorrq_u8(vbicq_u8(control, tab), del_or_high);
 
-        // NEON has no movemask. Shifting each 16-bit pair right by 4 and
-        // narrowing keeps 4 bits of every lane, in lane order.
-        let nibbles = vshrn_n_u16::<4>(vreinterpretq_u16_u8(stops));
+        lane_nibbles(stops)
+    }
+}
+
+/// Returns 4 bits of each lane of a compare result, lane 0 in the low bits.
+///
+/// NEON has no movemask. Shifting each 16-bit pair right by 4 and narrowing
+/// keeps 4 bits of every lane, in lane order.
+#[inline(always)]
+unsafe fn lane_nibbles(mask: uint8x16_t) -> u64 {
+    // SAFETY: The caller guarantees NEON.
+    unsafe {
+        let nibbles = vshrn_n_u16::<4>(vreinterpretq_u16_u8(mask));
         vget_lane_u64::<0>(vreinterpret_u64_u8(nibbles))
+    }
+}
+
+/// Advances `bytes` over 16-byte blocks that cannot hold the start of
+/// `\r\n\r\n`, and stops at the first that can, or when fewer than 18 bytes
+/// remain. See `swar::find_head_end_vectored` for the test and for what
+/// finishes the search.
+#[inline(always)]
+pub(super) fn skip_head_end_blocks(bytes: &mut Bytes<'_>) {
+    while bytes.len() >= BLOCK_SIZE + 2 {
+        // SAFETY: At least 18 bytes follow the pointer, and NEON is part of
+        // the aarch64 baseline.
+        if unsafe { has_cr_pair(bytes.remaining().as_ptr()) } {
+            return;
+        }
+
+        // SAFETY: More than a full block remains.
+        unsafe { bytes.advance(BLOCK_SIZE) };
+    }
+}
+
+/// Returns whether some byte among the 16 at `at` and the byte two after it
+/// are both `CR`.
+///
+/// Both loads read the input itself, not a copy of it. See
+/// `sse2::has_cr_pair` for why.
+///
+/// # Safety
+///
+/// At least 18 bytes must follow `at`, and the CPU must have NEON.
+#[inline(always)]
+unsafe fn has_cr_pair(at: *const u8) -> bool {
+    // SAFETY: Both loads read within the 18 bytes the caller guarantees.
+    unsafe {
+        let cr = vdupq_n_u8(b'\r');
+        let here = vceqq_u8(vld1q_u8(at), cr);
+        let after_two = vceqq_u8(vld1q_u8(at.add(2)), cr);
+        lane_nibbles(vandq_u8(here, after_two)) != 0
     }
 }
