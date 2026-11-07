@@ -115,8 +115,8 @@ jobs:
   # and the benchmark assertions run in `ci`.
   #
   # One job per CPU target, so a change that helps one architecture and
-  # hurts another shows up. The delimiter scans are SWAR today, and SIMD
-  # paths for x86_64 and aarch64 are planned.
+  # hurts another shows up. The header value scan and `find_head_end` have
+  # SSE2 and NEON paths, and the other scans are SWAR on every target.
   compare:
     name: compare (${{ matrix.name }})
     needs: plan
