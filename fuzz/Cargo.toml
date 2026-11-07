@@ -40,3 +40,10 @@ path = "fuzz_targets/scan.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "check"
+path = "fuzz_targets/check.rs"
+test = false
+doc = false
+bench = false

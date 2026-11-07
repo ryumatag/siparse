@@ -35,6 +35,19 @@ cargo +nightly fuzz run scan \
     -max_total_time=30 -max_len=4096
 ```
 
+The `check` target runs each function of [`siparse::check`] on the input.
+The plain form runs the head parser's code, SIMD included, and the `_const`
+form and the error offset scan one byte at a time, so it checks that all
+three agree. It also checks that a failing input is accepted up to its
+error offset:
+
+```text
+mkdir -p tmp/fuzz-check
+cargo +nightly fuzz run check \
+    tmp/fuzz-check fuzz/corpus/check -- \
+    -max_total_time=30 -max_len=4096
+```
+
 The harness checks borrowed ranges and initialized rows on every outcome,
 including errors. It compares parsing results across header buffer capacities,
 including zero, exact-fit, and insufficient capacities, using a 16-slot parse
@@ -422,6 +435,84 @@ pub fn scan(input: &[u8]) {
     }
 }
 
+/// Checks that the three forms of each check agree on `input`.
+///
+/// For each element:
+///
+/// * The plain form and the `_const` form both accept `input` or both
+///   reject it with the same [`ErrorKind`].
+/// * An accepted element is `input` itself, borrowed.
+/// * The error offset is `None` exactly when the check accepts `input`, and
+///   otherwise at most its length.
+/// * The bytes before the offset are accepted, or end too early. The offset
+///   is the first byte that is not accepted, so a check of the bytes before
+///   it can only fail at their end.
+pub fn check(input: &[u8]) {
+    use siparse::check;
+
+    type Check = fn(&[u8]) -> Result<&str, Error>;
+    type Offset = fn(&[u8]) -> Option<usize>;
+
+    let checks: [(&str, Check, Check, Offset); 5] = [
+        (
+            "method",
+            check::method,
+            check::method_const,
+            check::method_error_offset,
+        ),
+        (
+            "request_uri",
+            check::request_uri,
+            check::request_uri_const,
+            check::request_uri_error_offset,
+        ),
+        (
+            "reason_phrase",
+            check::reason_phrase,
+            check::reason_phrase_const,
+            check::reason_phrase_error_offset,
+        ),
+        (
+            "header_name",
+            check::header_name,
+            check::header_name_const,
+            check::header_name_error_offset,
+        ),
+        (
+            "header_value",
+            check::header_value,
+            check::header_value_const,
+            check::header_value_error_offset,
+        ),
+    ];
+
+    for (what, plain, constant, offset) in checks {
+        let result = plain(input);
+        assert_eq!(
+            result.map_err(|err| err.kind()),
+            constant(input).map_err(|err| err.kind()),
+            "{what} {input:?}"
+        );
+
+        match (result, offset(input)) {
+            (Ok(element), None) => {
+                assert_eq!(borrowed_range(input, element), 0..input.len());
+            }
+            (Err(_), Some(at)) => {
+                assert!(at <= input.len(), "{what} offset {at} {input:?}");
+                let before = &input[..at];
+                assert!(
+                    offset(before).is_none_or(|n| n == before.len()),
+                    "{what} fails before its offset {at} {input:?}"
+                );
+            }
+            (result, at) => {
+                panic!("{what} {result:?} with offset {at:?} {input:?}")
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,6 +610,15 @@ mod tests {
     // Embed wire bytes so these tests also run under Miri's isolation.
     // Keep this list in sync when adding checked-in seeds.
     macro_rules! seeds {
+    (@files $target:literal; $($name:literal),* $(,)?) => {
+        [
+            $(
+                include_bytes!(concat!("../corpus/", $target, "/", $name))
+                    .as_slice(),
+            )*
+        ]
+    };
+
     (
         @list $target:literal;
         $($name:literal => $expected:ident),* $(,)?
@@ -596,5 +696,21 @@ mod tests {
             response,
             parse_response::<16>,
         );
+    }
+
+    #[test]
+    fn check_target_seeds() {
+        for seed in seeds!(@files "check";
+            "header_value_long",
+            "header_value_escapes",
+            "header_value_fold",
+            "header_value_utf8",
+            "reason_phrase_escapes",
+            "request_uri",
+            "token",
+        ) {
+            check(seed);
+        }
+        check(b"");
     }
 }

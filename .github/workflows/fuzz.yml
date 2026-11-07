@@ -20,7 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [x86_64, aarch64]
-        target: [request_head, response_head, find_head_end, scan]
+        target: [request_head, response_head, find_head_end, scan, check]
         include:
           # The seed corpus for each target. `find_head_end` searches heads,
           # so it starts from the request heads.
@@ -32,6 +32,8 @@ jobs:
             corpus: request_head
           - target: scan
             corpus: scan
+          - target: check
+            corpus: check
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
