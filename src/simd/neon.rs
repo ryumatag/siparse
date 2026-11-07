@@ -77,27 +77,34 @@ unsafe fn lane_nibbles(mask: uint8x16_t) -> u64 {
 /// finishes the search.
 #[inline(always)]
 pub(super) fn skip_head_end_blocks(bytes: &mut Bytes<'_>) {
-    while let Some(window) = bytes.peek_n::<{ BLOCK_SIZE + 2 }>() {
-        // SAFETY: NEON is part of the aarch64 baseline.
-        if unsafe { has_cr_pair(window) } {
+    while bytes.len() >= BLOCK_SIZE + 2 {
+        // SAFETY: At least 18 bytes follow the pointer, and NEON is part of
+        // the aarch64 baseline.
+        if unsafe { has_cr_pair(bytes.remaining().as_ptr()) } {
             return;
         }
 
-        // SAFETY: `peek_n` saw more than a full block.
+        // SAFETY: More than a full block remains.
         unsafe { bytes.advance(BLOCK_SIZE) };
     }
 }
 
-/// Returns whether some byte in the first 16 of `window` and the byte two
-/// after it are both `CR`.
+/// Returns whether some byte among the 16 at `at` and the byte two after it
+/// are both `CR`.
+///
+/// Both loads read the input itself, not a copy of it. See
+/// `sse2::has_cr_pair` for why.
+///
+/// # Safety
+///
+/// At least 18 bytes must follow `at`, and the CPU must have NEON.
 #[inline(always)]
-unsafe fn has_cr_pair(window: [u8; BLOCK_SIZE + 2]) -> bool {
-    // SAFETY: Both loads read 16 of the 18 bytes of `window`. The caller
-    // guarantees NEON.
+unsafe fn has_cr_pair(at: *const u8) -> bool {
+    // SAFETY: Both loads read within the 18 bytes the caller guarantees.
     unsafe {
         let cr = vdupq_n_u8(b'\r');
-        let here = vceqq_u8(vld1q_u8(window.as_ptr()), cr);
-        let after_two = vceqq_u8(vld1q_u8(window.as_ptr().add(2)), cr);
+        let here = vceqq_u8(vld1q_u8(at), cr);
+        let after_two = vceqq_u8(vld1q_u8(at.add(2)), cr);
         lane_nibbles(vandq_u8(here, after_two)) != 0
     }
 }

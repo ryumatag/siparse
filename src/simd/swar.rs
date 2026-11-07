@@ -220,21 +220,29 @@ pub(crate) fn find_head_end_vectored(bytes: &mut Bytes<'_>) -> bool {
     const CR: usize = uniform_block(b'\r');
 
     // Two bytes past the block, so the second load can start at offset 2.
-    while let Some(window) = bytes.peek_n::<{ BLOCK_SIZE + 2 }>() {
-        let word = |offset: usize| {
-            let mut block = [0; BLOCK_SIZE];
-            block.copy_from_slice(&window[offset..offset + BLOCK_SIZE]);
-            usize::from_ne_bytes(block)
+    // Both loads read the input itself. Copying the 10 bytes out first, as
+    // `peek_n` does, made x86_64 load the second word across two stores,
+    // which stalls, and the scan took 26 to 50% longer than one for `CR`.
+    while bytes.len() >= BLOCK_SIZE + 2 {
+        let at = bytes.remaining().as_ptr();
+        // SAFETY: At least `BLOCK_SIZE + 2` bytes follow `at`.
+        // `read_unaligned` has no alignment requirement and reads in native
+        // byte order, as `usize::from_ne_bytes` does.
+        let (here, after_two) = unsafe {
+            (
+                at.cast::<usize>().read_unaligned(),
+                at.add(2).cast::<usize>().read_unaligned(),
+            )
         };
-        let pairs = eq_byte(word(0), CR) & eq_byte(word(2), CR);
+        let pairs = eq_byte(here, CR) & eq_byte(after_two, CR);
         if pairs == 0 {
-            // SAFETY: `peek_n` saw more than a full block.
+            // SAFETY: More than a full block remains.
             unsafe { bytes.advance(BLOCK_SIZE) };
             continue;
         }
 
         // SAFETY: `offsetnz` of a nonzero mask is below `BLOCK_SIZE`, and
-        // `peek_n` saw more than a full block.
+        // more than a full block remains.
         unsafe { bytes.advance(offsetnz(pairs)) };
         if is_head_end(bytes) {
             return true;
