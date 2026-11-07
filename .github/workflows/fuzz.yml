@@ -9,13 +9,29 @@ permissions:
   contents: read
 
 jobs:
+  # Every target on both architectures. The header value scan and
+  # `find_head_end` have separate SSE2 and NEON paths, and each is only
+  # fuzzed on a runner of its own architecture.
   fuzz:
-    runs-on: ubuntu-latest
+    name: fuzz (${{ matrix.target }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        target: [request_head, response_head]
+        arch: [x86_64, aarch64]
+        target: [request_head, response_head, find_head_end, scan]
+        include:
+          # The seed corpus for each target. `find_head_end` searches heads,
+          # so it starts from the request heads.
+          - target: request_head
+            corpus: request_head
+          - target: response_head
+            corpus: response_head
+          - target: find_head_end
+            corpus: request_head
+          - target: scan
+            corpus: scan
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -28,15 +44,16 @@ jobs:
       - name: Fuzz public API with AddressSanitizer
         env:
           FUZZ_TARGET: ${{ matrix.target }}
+          FUZZ_CORPUS: ${{ matrix.corpus }}
         run: |
           mkdir -p "tmp/fuzz/$FUZZ_TARGET"
           cargo fuzz run --sanitizer address "$FUZZ_TARGET" \
-            "tmp/fuzz/$FUZZ_TARGET" "fuzz/corpus/$FUZZ_TARGET" -- \
+            "tmp/fuzz/$FUZZ_TARGET" "fuzz/corpus/$FUZZ_CORPUS" -- \
             -max_total_time=300 -max_len=4096
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-artifacts-${{ matrix.target }}
+          name: fuzz-artifacts-${{ matrix.target }}-${{ matrix.arch }}
           path: fuzz/artifacts/${{ matrix.target }}/
           if-no-files-found: ignore
