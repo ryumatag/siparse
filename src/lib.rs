@@ -11,10 +11,8 @@ Every token is returned as a `&str` borrowed from the caller's input buffer,
 and header rows are written into storage that the caller provides. Parsing
 neither copies nor allocates.
 
-Delimiter scanning uses portable SWAR (SIMD Within A Register) code on every
-target. Header values, which hold most of the bytes in a head, are also scanned
-16 bytes at a time with SSE2 on x86_64 and NEON on aarch64. Both are part of
-their target's baseline, so no run-time detection is needed.
+Scanning uses portable SWAR (SIMD Within A Register) code, and SIMD on x86_64
+and aarch64 for header values. See [SIMD](#simd).
 
 Parse a SIP request:
 
@@ -205,6 +203,31 @@ validation pass.
 
 [RFC 3629]: https://www.rfc-editor.org/rfc/rfc3629
 [RFC 3261]: https://www.rfc-editor.org/rfc/rfc3261
+
+# SIMD
+
+Header values hold most of the bytes in a head, so their scan uses SIMD where
+the target has it:
+
+* **x86_64** - SSE2, 16 bytes at a time.
+* **aarch64** (little-endian) - NEON, 16 bytes at a time, after a first block
+  of SWAR. Many values end within those first bytes, and SWAR handles them
+  with less overhead.
+* **Other targets** - SWAR only, 8 bytes at a time on 64-bit targets and 4 on
+  32-bit ones. This includes 32-bit x86 and big-endian aarch64.
+
+SSE2 and NEON are part of the x86_64 and aarch64 baselines, so there is no
+run-time CPU detection and nothing to configure. Building with
+`-C target-cpu=native` does not enable wider instructions such as AVX2. The
+same holds without `std`.
+
+Every path accepts the same input and stops at the same byte as the others.
+Tests compare each one with a scalar reference. SIMD pays off as values get
+longer. Values of a few bytes cost about the same as with SWAR.
+
+The other scans, for header names, the Request-URI, reason phrases,
+[`find_head_end`], and the [`scan`] module, use SWAR or a lookup table per
+byte. What they cover is usually short, where SIMD saves little.
 
 # Crate features
 
