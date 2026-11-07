@@ -45,6 +45,10 @@ assert_eq!(head_end, buf.len());
 as on a socket that carries both, parse it with [`AnyHead`] and match on its
 [`StartLine`].
 
+The start-line fields are `Option`s so that a partial head can show how far
+the parser got. Once the head is complete, `complete()` on the start-line,
+such as [`RequestLine::complete`], returns the same fields without them.
+
 # Partial input
 
 [`Status::Partial`] is not an error. It means the buffer ends before the head
@@ -278,9 +282,10 @@ mod utf8;
 pub use self::{
     error::{Error, ErrorKind},
     parse::{
-        find_head_end, parse_ping, parse_pong, AnyHead, Header, HeaderBuf,
-        Headers, MessageHead, RequestHead, RequestLine, ResponseHead,
-        StartLine, Status, StatusLine, ValueLines,
+        find_head_end, parse_ping, parse_pong, AnyHead, CompleteRequestLine,
+        CompleteStartLine, CompleteStatusLine, Header, HeaderBuf, Headers,
+        MessageHead, RequestHead, RequestLine, ResponseHead, StartLine,
+        Status, StatusLine, ValueLines,
     },
 };
 

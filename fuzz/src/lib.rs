@@ -153,6 +153,7 @@ macro_rules! harness {
             let limit = match result {
                 Ok(Status::Complete(end)) => {
                     assert!(end <= input.len());
+                    assert!(head.start_line.complete().is_some());
                     end
                 }
                 _ => input.len(),
@@ -229,6 +230,9 @@ fn check_any_head(input: &[u8]) {
         b"SIP/2.0 200 OK\r\nX: prime\r\n\r\n".as_slice()
     });
     let result = head.parse(input);
+    if let Ok(Status::Complete(_)) = result {
+        assert!(head.start_line.and_then(|line| line.complete()).is_some());
+    }
 
     let range = |token: Option<&str>| token.map(|s| borrowed_range(input, s));
     let fields = match head.start_line {

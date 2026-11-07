@@ -23,6 +23,39 @@ pub struct RequestLine<'buf> {
     pub version: Option<&'buf str>,
 }
 
+impl<'buf> RequestLine<'buf> {
+    /// Returns the fields without their `Option`s, or `None` if any is
+    /// missing.
+    ///
+    /// After [`Status::Complete`] this is always `Some`, so code that has
+    /// a complete head can take the fields once instead of unwrapping each.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use siparse::{HeaderBuf, RequestHead, Status};
+    ///
+    /// let buf = b"BYE sip:alice@pc33.example.com SIP/2.0\r\n\r\n";
+    ///
+    /// let mut headers = HeaderBuf::<16>::new();
+    /// let mut head = RequestHead::new(&mut headers);
+    /// assert_eq!(head.parse(buf)?, Status::Complete(buf.len()));
+    ///
+    /// let line = head.start_line.complete().expect("the head is complete");
+    /// assert_eq!(line.method, "BYE");
+    /// assert_eq!(line.uri, "sip:alice@pc33.example.com");
+    /// # Ok::<(), siparse::Error>(())
+    /// ```
+    #[inline]
+    pub fn complete(&self) -> Option<CompleteRequestLine<'buf>> {
+        Some(CompleteRequestLine {
+            method: self.method?,
+            uri: self.uri?,
+            version: self.version?,
+        })
+    }
+}
+
 /// SIP status-line fields, each set once the parser has validated it.
 ///
 /// Each field borrows from the parsed input buffer. Fields are filled in wire
@@ -42,7 +75,7 @@ pub struct StatusLine<'buf> {
     pub reason_phrase: Option<&'buf str>,
 }
 
-impl StatusLine<'_> {
+impl<'buf> StatusLine<'buf> {
     /// Returns the status code as a number.
     ///
     /// SIP transaction handling branches on the code class all the time,
@@ -70,14 +103,34 @@ impl StatusLine<'_> {
     /// ```
     #[inline]
     pub fn code(&self) -> Option<u16> {
-        match *self.status_code?.as_bytes() {
-            [a @ b'0'..=b'9', b @ b'0'..=b'9', c @ b'0'..=b'9'] => Some(
-                u16::from(a - b'0') * 100
-                    + u16::from(b - b'0') * 10
-                    + u16::from(c - b'0'),
-            ),
-            _ => None,
-        }
+        status_code_number(self.status_code?)
+    }
+
+    /// Returns the fields without their `Option`s, or `None` if any is
+    /// missing.
+    ///
+    /// After [`Status::Complete`] this is always `Some`. See
+    /// [`RequestLine::complete`].
+    #[inline]
+    pub fn complete(&self) -> Option<CompleteStatusLine<'buf>> {
+        Some(CompleteStatusLine {
+            version: self.version?,
+            status_code: self.status_code?,
+            reason_phrase: self.reason_phrase?,
+        })
+    }
+}
+
+/// Converts three ASCII digits to a number.
+#[inline]
+fn status_code_number(status_code: &str) -> Option<u16> {
+    match *status_code.as_bytes() {
+        [a @ b'0'..=b'9', b @ b'0'..=b'9', c @ b'0'..=b'9'] => Some(
+            u16::from(a - b'0') * 100
+                + u16::from(b - b'0') * 10
+                + u16::from(c - b'0'),
+        ),
+        _ => None,
     }
 }
 
@@ -94,6 +147,97 @@ pub enum StartLine<'buf> {
     Request(RequestLine<'buf>),
     /// A status-line, such as `SIP/2.0 200 OK`.
     Status(StatusLine<'buf>),
+}
+
+impl<'buf> StartLine<'buf> {
+    /// Returns the start-line without its `Option`s, or `None` if any
+    /// field is missing.
+    ///
+    /// After [`Status::Complete`] this is always `Some`. See
+    /// [`RequestLine::complete`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use siparse::{AnyHead, CompleteStartLine, HeaderBuf, Status};
+    ///
+    /// let buf = b"SIP/2.0 486 Busy Here\r\n\r\n";
+    ///
+    /// let mut headers = HeaderBuf::<16>::new();
+    /// let mut head = AnyHead::new(&mut headers);
+    /// assert_eq!(head.parse(buf)?, Status::Complete(buf.len()));
+    ///
+    /// match head.start_line.and_then(|line| line.complete()) {
+    ///     Some(CompleteStartLine::Status(line)) => {
+    ///         assert_eq!(line.code(), Some(486));
+    ///         assert_eq!(line.reason_phrase, "Busy Here");
+    ///     }
+    ///     other => panic!("expected a status-line, got {other:?}"),
+    /// }
+    /// # Ok::<(), siparse::Error>(())
+    /// ```
+    #[inline]
+    pub fn complete(&self) -> Option<CompleteStartLine<'buf>> {
+        match self {
+            StartLine::Request(line) => {
+                line.complete().map(CompleteStartLine::Request)
+            }
+            StartLine::Status(line) => {
+                line.complete().map(CompleteStartLine::Status)
+            }
+        }
+    }
+}
+
+/// A request-line with every field present.
+///
+/// [`RequestLine::complete`] returns this once the parser has filled every
+/// field. Each field borrows from the parsed input buffer.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct CompleteRequestLine<'buf> {
+    /// The request method token, such as `INVITE`.
+    pub method: &'buf str,
+    /// The raw request URI. It is not percent-decoded.
+    pub uri: &'buf str,
+    /// The SIP version token as it appeared on the wire, such as `SIP/2.0`.
+    pub version: &'buf str,
+}
+
+/// A status-line with every field present.
+///
+/// [`StatusLine::complete`] returns this once the parser has filled every
+/// field. Each field borrows from the parsed input buffer.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct CompleteStatusLine<'buf> {
+    /// The SIP version token as it appeared on the wire, such as `SIP/2.0`.
+    pub version: &'buf str,
+    /// The three-digit status code, such as `200`.
+    pub status_code: &'buf str,
+    /// The raw reason phrase, possibly empty. `%`-escapes are not decoded.
+    pub reason_phrase: &'buf str,
+}
+
+impl CompleteStatusLine<'_> {
+    /// Returns the status code as a number.
+    ///
+    /// This behaves like [`StatusLine::code`]. It returns `None` only for a
+    /// `status_code` set by hand that is not exactly three ASCII digits.
+    #[inline]
+    pub fn code(&self) -> Option<u16> {
+        status_code_number(self.status_code)
+    }
+}
+
+/// A request-line or status-line with every field present.
+///
+/// [`StartLine::complete`] returns this once the parser has filled every
+/// field.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CompleteStartLine<'buf> {
+    /// A request-line, such as `INVITE sip:bob@example.com SIP/2.0`.
+    Request(CompleteRequestLine<'buf>),
+    /// A status-line, such as `SIP/2.0 200 OK`.
+    Status(CompleteStatusLine<'buf>),
 }
 
 /// Parses a request-line or status-line, deciding which from its first bytes.
@@ -419,5 +563,85 @@ mod tests {
         {
             assert_eq!(line_with_code(status_code).code(), None);
         }
+    }
+
+    #[test]
+    fn complete_needs_every_request_line_field() {
+        let line = RequestLine {
+            method: Some("INVITE"),
+            uri: Some("sip:bob@example.com"),
+            version: Some("SIP/2.0"),
+        };
+        assert_eq!(
+            line.complete(),
+            Some(CompleteRequestLine {
+                method: "INVITE",
+                uri: "sip:bob@example.com",
+                version: "SIP/2.0",
+            })
+        );
+
+        for partial in [
+            RequestLine { method: None, ..line },
+            RequestLine { uri: None, ..line },
+            RequestLine { version: None, ..line },
+        ] {
+            assert_eq!(partial.complete(), None, "{partial:?}");
+        }
+    }
+
+    #[test]
+    fn complete_needs_every_status_line_field() {
+        let line = StatusLine {
+            version: Some("SIP/2.0"),
+            status_code: Some("200"),
+            reason_phrase: Some(""),
+        };
+        let complete = line.complete().unwrap();
+        assert_eq!(
+            complete,
+            CompleteStatusLine {
+                version: "SIP/2.0",
+                status_code: "200",
+                reason_phrase: "",
+            }
+        );
+        assert_eq!(complete.code(), Some(200));
+
+        for partial in [
+            StatusLine { version: None, ..line },
+            StatusLine { status_code: None, ..line },
+            StatusLine { reason_phrase: None, ..line },
+        ] {
+            assert_eq!(partial.complete(), None, "{partial:?}");
+        }
+    }
+
+    #[test]
+    fn start_line_complete_keeps_the_kind() {
+        let request = RequestLine {
+            method: Some("ACK"),
+            uri: Some("sip:bob@example.com"),
+            version: Some("SIP/2.0"),
+        };
+        assert_eq!(
+            StartLine::Request(request).complete(),
+            request.complete().map(CompleteStartLine::Request)
+        );
+        assert_eq!(
+            StartLine::Request(RequestLine::default()).complete(),
+            None
+        );
+
+        let status = StatusLine {
+            version: Some("SIP/2.0"),
+            status_code: Some("180"),
+            reason_phrase: Some("Ringing"),
+        };
+        assert_eq!(
+            StartLine::Status(status).complete(),
+            status.complete().map(CompleteStartLine::Status)
+        );
+        assert_eq!(StartLine::Status(StatusLine::default()).complete(), None);
     }
 }
