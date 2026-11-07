@@ -338,6 +338,18 @@ pub mod bench {
         parse::parse_header_name(bytes)
     }
 
+    /// [`find_head_end`](crate::find_head_end) with SWAR only, the fallback
+    /// on other targets.
+    #[doc(hidden)]
+    #[inline]
+    pub fn find_head_end_swar(buf: &[u8], scanned: usize) -> Option<usize> {
+        crate::parse::find_head_end_with(
+            buf,
+            scanned,
+            crate::simd::find_head_end_swar,
+        )
+    }
+
     /// Advances over ASCII header value bytes with the scan the parser uses,
     /// SIMD where the target has it, and returns how many it passed.
     #[doc(hidden)]
