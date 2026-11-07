@@ -1,6 +1,6 @@
 [package]
 name = "siparse"
-version = "0.4.2"
+version = "0.4.3"
 authors = ["Ryuma Taguchi <ryumatag@gmail.com>"]
 description = "A syntactic parser for SIP message heads"
 repository = "https://github.com/ryumatag/siparse"
