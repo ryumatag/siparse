@@ -237,8 +237,15 @@ jobs:
         working-directory: bench
         run: |
           mkdir -p ../bench-results
-          critcmp --export base > "../bench-results/$TARGET-base.json"
-          critcmp --export head > "../bench-results/$TARGET-head.json"
+          for baseline in base head; do
+            out="../bench-results/$TARGET-$baseline.json"
+            # The base has no baseline when none of the filtered benchmarks
+            # existed there yet, such as benchmarks added on this branch.
+            if ! critcmp --export "$baseline" > "$out"; then
+              echo "No $baseline baseline to export."
+              rm "$out"
+            fi
+          done
       - name: Upload the baselines
         if: steps.base.outputs.ran == 'true'
         uses: actions/upload-artifact@v7
