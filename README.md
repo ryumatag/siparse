@@ -20,9 +20,8 @@ are left to the caller.
 Every parsed token is a `&str` borrowed from the input buffer, so parsing
 neither copies nor allocates. It works without `std`.
 
-Scanning uses portable SWAR (SIMD Within A Register) code. Header values,
-which hold most of a head's bytes, are scanned with SSE2 on x86_64 and NEON on
-aarch64.
+Scanning uses portable SWAR (SIMD Within A Register) code. Header values and
+the search for the end of a head use SSE2 on x86_64 and NEON on aarch64.
 
 ### Example
 

@@ -12,7 +12,7 @@ and header rows are written into storage that the caller provides. Parsing
 neither copies nor allocates.
 
 Scanning uses portable SWAR (SIMD Within A Register) code, and SIMD on x86_64
-and aarch64 for header values. See [SIMD](#simd).
+and aarch64 for header values and the end of a head. See [SIMD](#simd).
 
 Parse a SIP request:
 
@@ -206,13 +206,13 @@ validation pass.
 
 # SIMD
 
-Header values hold most of the bytes in a head, so their scan uses SIMD where
-the target has it:
+Two scans use SIMD where the target has it. The header value scan covers most
+of the bytes in a head, and [`find_head_end`] covers every byte of it:
 
 * **x86_64** - SSE2, 16 bytes at a time.
-* **aarch64** (little-endian) - NEON, 16 bytes at a time, after a first block
-  of SWAR. Many values end within those first bytes, and SWAR handles them
-  with less overhead.
+* **aarch64** (little-endian) - NEON, 16 bytes at a time. Header values start
+  with a block of SWAR, because many end within those first bytes, and SWAR
+  handles them with less overhead.
 * **Other targets** - SWAR only, 8 bytes at a time on 64-bit targets and 4 on
   32-bit ones. This includes 32-bit x86 and big-endian aarch64.
 
@@ -224,10 +224,12 @@ same holds without `std`.
 Every path accepts the same input and stops at the same byte as the others.
 Tests compare each one with a scalar reference. SIMD pays off as values get
 longer. Values of a few bytes cost about the same as with SWAR.
+[`find_head_end`] gains on reads of any length, since it skips whole blocks
+until the end of the head and needs no setup.
 
-The other scans, for header names, the Request-URI, reason phrases,
-[`find_head_end`], and the [`scan`] module, use SWAR or a lookup table per
-byte. What they cover is usually short, where SIMD saves little.
+The other scans, for header names, the Request-URI, reason phrases, and the
+[`scan`] module, use SWAR or a lookup table per byte. What they cover is
+usually short, where SIMD saves little.
 
 # Crate features
 
