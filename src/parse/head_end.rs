@@ -28,9 +28,14 @@ const HEAD_END: &[u8] = b"\r\n\r\n";
 /// [`Status::Complete`]: crate::Status::Complete
 /// [`Status::Partial`]: crate::Status::Partial
 ///
+/// A `scanned` greater than `buf.len()` is a caller bug, such as a count
+/// kept across a buffer that was drained or replaced. It panics in debug
+/// builds. In release builds the search starts over from the beginning of
+/// `buf`, since the count says nothing about the bytes `buf` now holds.
+///
 /// # Panics
 ///
-/// Panics if `scanned` is greater than `buf.len()`.
+/// Panics in debug builds if `scanned` is greater than `buf.len()`.
 ///
 /// # Example
 ///
@@ -77,7 +82,14 @@ pub(crate) fn find_head_end_with(
     scanned: usize,
     scan: fn(&mut Bytes<'_>) -> bool,
 ) -> Option<usize> {
-    assert!(scanned <= buf.len(), "scanned is past the end of the buffer");
+    debug_assert!(
+        scanned <= buf.len(),
+        "scanned is past the end of the buffer"
+    );
+    // A count past the end cannot describe this buffer. Searching all of it
+    // still finds the end, where clamping to the length could skip it and
+    // leave the caller waiting for a read that already happened.
+    let scanned = if scanned > buf.len() { 0 } else { scanned };
 
     // The empty line can start no earlier than three bytes before the
     // scanned part ends, or it would have ended inside it.
@@ -190,9 +202,22 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn panics_when_scanned_exceeds_the_length() {
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "scanned is past the end of the buffer")]
+    fn panics_in_debug_when_scanned_exceeds_the_length() {
         let _ = find_head_end(b"\r\n", 3);
+    }
+
+    /// A stale count from a longer buffer would skip the end if it were
+    /// clamped to the length.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn searches_again_when_scanned_exceeds_the_length() {
+        assert_eq!(
+            find_head_end(REQUEST, REQUEST.len() + 1),
+            find_head_end(REQUEST, 0),
+        );
+        assert!(find_head_end(REQUEST, 0).is_some());
     }
 
     /// Every string over `CR`, `LF`, and one other byte, up to `MAX_LEN`
