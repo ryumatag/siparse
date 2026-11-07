@@ -209,50 +209,38 @@ fn scan_tail(predicate: impl Fn(u8) -> bool, bytes: &[u8]) -> usize {
 /// `true`. Without one, it returns `false` and leaves the cursor somewhere in
 /// the last three bytes, where a later match could still start.
 ///
-/// The scan tests each block for positions where a byte and the one two after
-/// it are both `CR`. Every match starts at such a position, and in a head
-/// nothing else does, because each row ends in `CRLF` and a name byte. So a
-/// block almost never stops the loop before the end of the head. A scan for
-/// `CR` alone stopped at every row, found the lane, checked three bytes, and
-/// started again, and those stops were most of its time.
+/// The scan looks for `CR` one block at a time and checks the three bytes
+/// after each one. A head has one `CR` per row, so the check runs once per row
+/// and the block scan does the rest of the work.
+///
+/// The SIMD scans test for a `CR` with another two bytes after it instead,
+/// which never stops before the end of a head. In 8-byte words the second
+/// load and compare cost more than the stops they save. Whole heads took 6
+/// to 25% longer on CI, so SWAR keeps this test. After SIMD it only sees the
+/// last block or two of a head.
 #[inline]
 pub(crate) fn find_head_end_vectored(bytes: &mut Bytes<'_>) -> bool {
     const CR: usize = uniform_block(b'\r');
 
-    // Two bytes past the block, so the second load can start at offset 2.
-    // Both loads read the input itself. Copying the 10 bytes out first, as
-    // `peek_n` does, made x86_64 load the second word across two stores,
-    // which stalls, and the scan took 26 to 50% longer than one for `CR`.
-    while bytes.len() >= BLOCK_SIZE + 2 {
-        let at = bytes.remaining().as_ptr();
-        // SAFETY: At least `BLOCK_SIZE + 2` bytes follow `at`.
-        // `read_unaligned` has no alignment requirement and reads in native
-        // byte order, as `usize::from_ne_bytes` does.
-        let (here, after_two) = unsafe {
-            (
-                at.cast::<usize>().read_unaligned(),
-                at.add(2).cast::<usize>().read_unaligned(),
-            )
-        };
-        let pairs = eq_byte(here, CR) & eq_byte(after_two, CR);
-        if pairs == 0 {
-            // SAFETY: More than a full block remains.
-            unsafe { bytes.advance(BLOCK_SIZE) };
+    while let Some(block) = bytes.peek_n::<BLOCK_SIZE>() {
+        let n = offsetnz(eq_byte(usize::from_ne_bytes(block), CR));
+
+        // SAFETY: `n <= BLOCK_SIZE`, and `peek_n` saw a full block.
+        unsafe { bytes.advance(n) };
+
+        if n == BLOCK_SIZE {
             continue;
         }
 
-        // SAFETY: `offsetnz` of a nonzero mask is below `BLOCK_SIZE`, and
-        // more than a full block remains.
-        unsafe { bytes.advance(offsetnz(pairs)) };
         if is_head_end(bytes) {
             return true;
         }
 
-        // SAFETY: The `CR` of the pair found above is at the cursor.
+        // SAFETY: The `CR` found above is at the cursor.
         unsafe { bytes.advance(1) };
     }
 
-    // Fewer than `BLOCK_SIZE + 2` bytes remain.
+    // Fewer than `BLOCK_SIZE` bytes remain.
     while bytes.len() >= HEAD_END.len() {
         if is_head_end(bytes) {
             return true;
