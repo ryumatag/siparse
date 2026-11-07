@@ -72,7 +72,7 @@ pub(crate) type Result<T> = core::result::Result<Status<T>, Error>;
 /// Parsing is not resumable. After `Partial`, the head holds what was parsed
 /// so far, and the caller parses again from the beginning once more input has
 /// arrived.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Status<T> {
     /// Parsing completed successfully and produced `T`.
     Complete(T),

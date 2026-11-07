@@ -80,7 +80,7 @@ pub struct Headers<'buf, R: ?Sized = [MaybeUninit<Header<'buf>>]> {
 ///
 /// `Header` represents one header field row exactly as it appeared in the
 /// parsed head. Both fields borrow from the parsed input buffer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Header<'buf> {
     /// The header field name, without the whitespace that may precede `:`.
     ///

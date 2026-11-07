@@ -13,7 +13,7 @@ use crate::{
 /// order, so after [`Status::Partial`] or an error the fields parsed before
 /// the parser stopped are `Some` and the rest are `None`. After
 /// [`Status::Complete`], every field is `Some`.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct RequestLine<'buf> {
     /// The request method token, such as `INVITE`.
     pub method: Option<&'buf str>,
@@ -29,7 +29,7 @@ pub struct RequestLine<'buf> {
 /// order, so after [`Status::Partial`] or an error the fields parsed before
 /// the parser stopped are `Some` and the rest are `None`. After
 /// [`Status::Complete`], every field is `Some`.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct StatusLine<'buf> {
     /// The SIP version token as it appeared on the wire, such as `SIP/2.0`.
     pub version: Option<&'buf str>,
@@ -88,7 +88,7 @@ impl StatusLine<'_> {
 /// connection or socket, so a SIP element often has to parse a head before it
 /// knows which kind it is. [`AnyHead`](crate::AnyHead) decides from the first
 /// bytes of the start-line and stores the result here.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum StartLine<'buf> {
     /// A request-line, such as `INVITE sip:bob@example.com SIP/2.0`.
     Request(RequestLine<'buf>),
