@@ -77,7 +77,7 @@ pub(super) fn match_header_value_first_block(bytes: &mut Bytes<'_>) -> bool {
 }
 
 #[inline(always)]
-pub(super) fn match_header_value_vectored(bytes: &mut Bytes<'_>) {
+pub(crate) fn match_header_value_vectored(bytes: &mut Bytes<'_>) {
     while let Some(block) = bytes.peek_n::<BLOCK_SIZE>() {
         let n = match_header_value_block(block);
 

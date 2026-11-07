@@ -1,13 +1,51 @@
 use std::hint::black_box as bb;
 
 use criterion::Criterion;
-use siparse::bench::{parse_header_value, Bytes};
+use siparse::bench::{
+    find_header_value_stop, find_header_value_stop_swar, parse_header_value,
+    Bytes,
+};
 
 use crate::benchmark;
 
 pub(super) fn parse(c: &mut Criterion) {
     fixed_shape(c);
     sweep(c);
+    find_stop(c);
+}
+
+// The scan alone, with SIMD where the target has it and with SWAR only. SWAR
+// is the fallback on other targets, so a regression there shows up here.
+fn find_stop(c: &mut Criterion) {
+    const NAME: &str = "find/header_value_stop";
+
+    type Find = fn(&mut Bytes<'_>) -> usize;
+    let finds: [(&str, Find); _] = [
+        ("simd", find_header_value_stop),
+        ("swar", find_header_value_stop_swar),
+    ];
+    let cases: [(_, &[u8]); _] = [
+        ("typical", b"SIP/2.0/UDP host.example.com;branch=z9hG4bK\r\nX"),
+        (
+            "long",
+            b"SIP/2.0/UDP host-1.example.com:5060;\
+              branch=z9hG4bKabcdefghijklmnop;rport;\
+              received=192.0.2.1\r\nX",
+        ),
+    ];
+
+    for (variant, input) in cases {
+        let expected = input.len() - 3;
+        for (find_name, find) in finds {
+            let id = format!("{NAME}/{variant}/{find_name}");
+            benchmark(c, id, expected as u64, |b| {
+                b.iter(|| {
+                    let mut bytes = Bytes::new(bb(input));
+                    assert_eq!(bb(find(&mut bytes)), expected);
+                });
+            });
+        }
+    }
 }
 
 fn fixed_shape(c: &mut Criterion) {

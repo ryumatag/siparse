@@ -15,6 +15,8 @@ pub(super) use self::swar::{
     match_uri_vectored,
 };
 
+#[cfg(feature = "__bench")]
+pub(crate) use self::swar::match_header_value_vectored as match_header_value_swar;
 use crate::iter::Bytes;
 
 /// Advances `bytes` over ASCII header value bytes, stopping at the first byte

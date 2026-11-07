@@ -11,8 +11,10 @@ Every token is returned as a `&str` borrowed from the caller's input buffer,
 and header rows are written into storage that the caller provides. Parsing
 neither copies nor allocates.
 
-Delimiter scanning currently uses portable SWAR (SIMD Within A Register) code
-on every target. SIMD fast paths for x86_64 and aarch64 are planned.
+Delimiter scanning uses portable SWAR (SIMD Within A Register) code on every
+target. Header values, which hold most of the bytes in a head, are also scanned
+16 bytes at a time with SSE2 on x86_64 and NEON on aarch64. Both are part of
+their target's baseline, so no run-time detection is needed.
 
 Parse a SIP request:
 
@@ -311,6 +313,25 @@ pub mod bench {
         bytes: &mut Bytes<'buf>,
     ) -> Result<&'buf str> {
         parse::parse_header_name(bytes)
+    }
+
+    /// Advances over ASCII header value bytes with the scan the parser uses,
+    /// SIMD where the target has it, and returns how many it passed.
+    #[doc(hidden)]
+    #[inline]
+    pub fn find_header_value_stop(bytes: &mut Bytes<'_>) -> usize {
+        let start = bytes.pos();
+        crate::simd::match_header_value_vectored(bytes);
+        bytes.pos() - start
+    }
+
+    /// The same scan with SWAR only, the fallback on other targets.
+    #[doc(hidden)]
+    #[inline]
+    pub fn find_header_value_stop_swar(bytes: &mut Bytes<'_>) -> usize {
+        let start = bytes.pos();
+        crate::simd::match_header_value_swar(bytes);
+        bytes.pos() - start
     }
 
     #[doc(hidden)]
