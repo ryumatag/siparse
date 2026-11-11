@@ -427,33 +427,36 @@ impl<'a> List<'a> {
     #[inline]
     fn next<T>(
         &mut self,
-        read: fn(&'a str) -> Result<(T, &'a str), Error>,
+        read: impl FnOnce(&'a str) -> Result<(T, &'a str), Error>,
         invalid: Error,
     ) -> Option<Result<T, Error>> {
         if self.done {
             return None;
         }
 
-        let result = read(self.rest).and_then(|(element, tail)| {
-            let tail = scan::sws(tail);
-            match tail.strip_prefix(',') {
-                Some(next) => {
-                    self.rest = next;
-                    Ok(element)
-                }
-                None if tail.is_empty() => {
-                    self.done = true;
-                    self.rest = tail;
-                    Ok(element)
-                }
-                None => Err(invalid),
-            }
-        });
-        if result.is_err() {
+        let (element, tail) = match read(self.rest) {
+            Ok(found) => found,
+            Err(err) => return Some(Err(self.fail(err))),
+        };
+        let tail = scan::sws(tail);
+        if let Some(next) = tail.strip_prefix(',') {
+            self.rest = next;
+        } else if tail.is_empty() {
+            self.rest = tail;
             self.done = true;
-            self.rest = &self.rest[self.rest.len()..];
+        } else {
+            return Some(Err(self.fail(invalid)));
         }
-        Some(result)
+        Some(Ok(element))
+    }
+
+    /// Ends the list after an error, leaving an empty rest that still points
+    /// into the value.
+    #[cold]
+    fn fail(&mut self, err: Error) -> Error {
+        self.rest = &self.rest[self.rest.len()..];
+        self.done = true;
+        err
     }
 }
 
@@ -546,11 +549,11 @@ fn has_scheme(uri: &str) -> bool {
 /// Reads the next parameter of a [`Params`], with the `;` before it.
 ///
 /// The parameters were checked when the `Params` was made, by
-/// [`generic_param`] or [`via_param`]. Every value either grammar accepts is
-/// a `quoted-string` or ends at whitespace or a `;`, so this one reader
-/// splits both, and `Params` need not say which grammar it holds. Keeping
-/// that in `Params` grew [`Address`] by eight bytes and made
-/// `value/address/*` about 9% slower.
+/// [`generic_param`] or [`via_param`]. The only value one accepts and the
+/// other does not is a bare IPv6 `received`, which a `token` cannot read
+/// past, so this one reader splits both and `Params` need not say which
+/// grammar it holds. Keeping that in `Params` grew [`Address`] by eight
+/// bytes, and `value/address/*` measured about 9% slower.
 #[inline]
 fn checked_param(src: &str) -> Option<(Param<'_>, &str)> {
     let rest = scan::separator(src, ';')?;
@@ -559,14 +562,15 @@ fn checked_param(src: &str) -> Option<(Param<'_>, &str)> {
     let Some(value) = scan::separator(rest, '=') else {
         return Some((Param { name, value: None }, rest));
     };
-    let (value, rest) = if value.starts_with('"') {
-        scan::quoted_string(value)?
-    } else {
-        let end = value
-            .bytes()
-            .position(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n' | b';'))
-            .unwrap_or(value.len());
-        value.split_at(end)
+    let (value, rest) = match value.as_bytes().first()? {
+        b'"' => scan::quoted_string(value)?,
+        b'[' => scan::host(value)?,
+        // A `token` stops at the first `:` of a bare IPv6 `received`, or
+        // finds nothing when the address starts with `::`.
+        _ => match scan::token(value) {
+            Some((token, rest)) if !rest.starts_with(':') => (token, rest),
+            _ => split_run(value, simd::match_ipv6_vectored)?,
+        },
     };
     Some((Param { name, value: Some(value) }, rest))
 }
