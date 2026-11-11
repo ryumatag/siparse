@@ -6,7 +6,8 @@ or a `quoted-string`. The functions here put them together into the productions
 that several header grammars share, and return each part as written. From, To,
 Contact, Route, Record-Route and Reply-To all hold a `name-addr` or an
 `addr-spec` followed by `generic-param`s, so [`address`] and [`addresses`] read
-any of them.
+any of them. [`cseq`] and [`call_id`] read the two values that, with the tags in
+From and To, tell which request and which dialog a message belongs to.
 
 # Example
 
@@ -487,12 +488,114 @@ fn generic_param(src: &str) -> Option<(Param<'_>, &str)> {
     Some((Param { name, value: Some(value) }, rest))
 }
 
+/// A CSeq value: a sequence number and a method.
+///
+/// RFC 3261, Section 25.1:
+///
+/// ```text
+/// CSeq  =  "CSeq" HCOLON 1*DIGIT LWS Method
+/// ```
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct CSeq<'a> {
+    /// The sequence number as written, with any leading zeros.
+    ///
+    /// RFC 3261 section 20.16 requires it to fit in 32 bits. That is checked
+    /// when the caller converts it, as with a status code.
+    pub number: &'a str,
+    /// The method as written, a `token`. RFC 3261 compares methods
+    /// case-sensitively, so `invite` is an extension method, not INVITE.
+    pub method: &'a str,
+}
+
+/// Reads a CSeq value.
+///
+/// # Errors
+///
+/// Returns an [`ErrorKind::CSeq`](crate::ErrorKind::CSeq) error if `src` is
+/// not digits, whitespace and a method, with only whitespace around them.
+///
+/// # Example
+///
+/// ```
+/// use siparse::value;
+///
+/// let cseq = value::cseq("314159 INVITE")?;
+/// assert_eq!(cseq.number.parse::<u32>(), Ok(314159));
+/// assert_eq!(cseq.method, "INVITE");
+///
+/// assert!(value::cseq("1INVITE").is_err());
+/// # Ok::<(), siparse::Error>(())
+/// ```
+#[inline]
+pub fn cseq(src: &str) -> Result<CSeq<'_>, Error> {
+    let invalid = Error::cseq();
+
+    let (number, rest) = scan::digits(scan::sws(src)).ok_or(invalid)?;
+    let rest = scan::lws(rest).ok_or(invalid)?;
+    let (method, rest) = scan::token(rest).ok_or(invalid)?;
+    if !scan::sws(rest).is_empty() {
+        return Err(invalid);
+    }
+
+    Ok(CSeq { number, method })
+}
+
+/// Reads a Call-ID value and returns the `callid` without the whitespace
+/// around it.
+///
+/// RFC 3261 section 20.8 compares Call-IDs byte by byte, so the `callid` is
+/// returned as one string, `@` included, rather than in two halves.
+///
+/// RFC 3261, Section 25.1:
+///
+/// ```text
+/// Call-ID  =  ( "Call-ID" / "i" ) HCOLON callid
+/// callid   =  word [ "@" word ]
+/// ```
+///
+/// # Errors
+///
+/// Returns an [`ErrorKind::CallId`](crate::ErrorKind::CallId) error if `src`
+/// is not one `word`, or two joined by `@`, with only whitespace around it.
+///
+/// # Example
+///
+/// ```
+/// use siparse::value;
+///
+/// assert_eq!(value::call_id(" f81d4fae-7dec-11d0@192.0.2.4 ")?, "f81d4fae-7dec-11d0@192.0.2.4");
+/// assert!(value::call_id("a@b@c").is_err());
+/// # Ok::<(), siparse::Error>(())
+/// ```
+#[inline]
+pub fn call_id(src: &str) -> Result<&str, Error> {
+    let invalid = Error::call_id();
+
+    let src = scan::sws(src);
+    let (_, rest) =
+        split_run(src, simd::match_word_vectored).ok_or(invalid)?;
+    let rest = match rest.strip_prefix('@') {
+        Some(host) => {
+            split_run(host, simd::match_word_vectored).ok_or(invalid)?.1
+        }
+        None => rest,
+    };
+    if !scan::sws(rest).is_empty() {
+        return Err(invalid);
+    }
+
+    Ok(&src[..src.len() - rest.len()])
+}
+
 #[cfg(test)]
 mod tests {
     use std::{format, string::String, vec, vec::Vec};
 
     use super::*;
-    use crate::{token::is_addr_spec_token, ErrorKind};
+    use crate::{
+        token::{is_addr_spec_token, is_word},
+        ErrorKind,
+    };
 
     fn param(
         name: &'static str,
@@ -904,6 +1007,122 @@ mod tests {
             src.push_str(&format!(", <sip:a{i}@x;lr>;n={i}"));
         }
         assert_eq!(addresses(&src).filter(Result::is_ok).count(), 200);
+    }
+
+    #[test]
+    fn cseq_values() {
+        for (src, number, method) in [
+            ("314159 INVITE", "314159", "INVITE"),
+            ("1 X-VENDOR", "1", "X-VENDOR"),
+            (" 7 \t ACK", "7", "ACK"),
+            ("7\r\n ACK", "7", "ACK"),
+            ("7 ACK \r\n ", "7", "ACK"),
+            ("007 BYE", "007", "BYE"),
+            ("4294967296 BYE", "4294967296", "BYE"),
+            ("1 invite", "1", "invite"),
+        ] {
+            let found =
+                cseq(src).unwrap_or_else(|err| panic!("{src:?}: {err}"));
+            assert_eq!(
+                (found.number, found.method),
+                (number, method),
+                "{src:?}"
+            );
+            assert_borrowed(src, found.number);
+            assert_borrowed(src, found.method);
+        }
+
+        for src in [
+            "",
+            " ",
+            "INVITE",
+            "1",
+            "1 ",
+            "1INVITE",
+            "-1 INVITE",
+            "+1 INVITE",
+            "1 INVITE extra",
+            "1 IN VITE",
+            "1 IN@VITE",
+            "1.0 INVITE",
+            "1 INVITE;x",
+            "\u{e9} INVITE",
+            "1 \u{e9}",
+        ] {
+            assert_eq!(
+                cseq(src).map_err(|err| err.kind()),
+                Err(ErrorKind::CSeq),
+                "{src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn call_id_values() {
+        for (src, expected) in [
+            (
+                "a84b4c76e66710@pc33.atlanta.com",
+                "a84b4c76e66710@pc33.atlanta.com",
+            ),
+            ("  f81d4fae-7dec-11d0 ", "f81d4fae-7dec-11d0"),
+            ("abc\r\n ", "abc"),
+            ("\r\n abc", "abc"),
+            ("CaseMatters", "CaseMatters"),
+            ("<{a}>:\\\"/[b]?@(c)", "<{a}>:\\\"/[b]?@(c)"),
+            ("-.!%*_+`'~@x", "-.!%*_+`'~@x"),
+        ] {
+            let found =
+                call_id(src).unwrap_or_else(|err| panic!("{src:?}: {err}"));
+            assert_eq!(found, expected, "{src:?}");
+            assert_borrowed(src, found);
+        }
+
+        for src in [
+            "",
+            " ",
+            "two words",
+            "a@b@c",
+            "@host",
+            "a@",
+            "a@ b",
+            "a @b",
+            "a,b",
+            "a;b",
+            "a=b",
+            "a&b",
+            "a#b",
+            "a\u{e9}",
+        ] {
+            assert_eq!(
+                call_id(src).map_err(|err| err.kind()),
+                Err(ErrorKind::CallId),
+                "{src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn word_scan_matches_its_byte_class() {
+        let mut inputs: Vec<String> = (0u8..0x80)
+            .map(|b| format!("a{}bcdefghijklmnop", b as char))
+            .collect();
+        inputs.push(String::from("\u{e9}abc"));
+
+        for input in &inputs {
+            for start in 0..input.len() {
+                if !input.is_char_boundary(start) {
+                    continue;
+                }
+                let src = &input[start..];
+                let n = src.bytes().take_while(|&b| is_word(b)).count();
+                let expected = (n > 0).then(|| src.split_at(n));
+                assert_eq!(
+                    split_run(src, simd::match_word_vectored),
+                    expected,
+                    "{src:?}"
+                );
+            }
+        }
     }
 
     #[test]

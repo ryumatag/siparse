@@ -81,6 +81,12 @@ pub enum ErrorKind {
     /// A `;` is not followed by a `generic-param`, which is a `token`
     /// optionally followed by `=` and a `token`, `host` or `quoted-string`.
     GenericParam,
+    /// A CSeq value is not `1*DIGIT LWS Method`, where
+    /// [`value::cseq`](crate::value::cseq) reads one.
+    CSeq,
+    /// A Call-ID value is not `word [ "@" word ]`, where
+    /// [`value::call_id`](crate::value::call_id) reads one.
+    CallId,
     /// The caller-provided header storage is too small to hold every header
     /// row in the head.
     ///
@@ -168,6 +174,18 @@ impl Error {
         Error { kind: ErrorKind::GenericParam }
     }
 
+    /// Returns an error indicating an invalid CSeq value.
+    #[inline]
+    pub(crate) const fn cseq() -> Error {
+        Error { kind: ErrorKind::CSeq }
+    }
+
+    /// Returns an error indicating an invalid Call-ID value.
+    #[inline]
+    pub(crate) const fn call_id() -> Error {
+        Error { kind: ErrorKind::CallId }
+    }
+
     /// Returns an error indicating that the caller-provided header row buffer
     /// was too small to hold all parsed header rows.
     #[inline]
@@ -191,6 +209,8 @@ impl ErrorKind {
             ErrorKind::BareLf => "LF not preceded by CR",
             ErrorKind::Address => "invalid SIP name-addr or addr-spec",
             ErrorKind::GenericParam => "invalid SIP generic-param",
+            ErrorKind::CSeq => "invalid SIP CSeq",
+            ErrorKind::CallId => "invalid SIP Call-ID",
             ErrorKind::TooManyHeaders => {
                 "too many SIP headers for provided header buffer"
             }

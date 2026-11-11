@@ -48,6 +48,24 @@ pub(super) fn value(c: &mut Criterion) {
         });
     });
 
+    // The values that match a response to its transaction and a request to
+    // its dialog.
+    let cseq = "314159 INVITE";
+    benchmark(c, "value/cseq", cseq.len() as u64, |b| {
+        b.iter(|| {
+            let found = bb(value::cseq(bb(cseq))).unwrap();
+            assert_eq!(found.number.len(), 6);
+        });
+    });
+
+    let call_id = "a84b4c76e66710@pc33.atlanta.example.com";
+    benchmark(c, "value/call_id", call_id.len() as u64, |b| {
+        b.iter(|| {
+            let found = bb(value::call_id(bb(call_id))).unwrap();
+            assert_eq!(found.len(), call_id.len());
+        });
+    });
+
     // Parameters as they follow a Via's `sent-by`, read and walked.
     let params = ";branch=z9hG4bK776asdhds;rport;received=192.0.2.4;ttl=16";
     benchmark(c, "value/params/typical", params.len() as u64, |b| {

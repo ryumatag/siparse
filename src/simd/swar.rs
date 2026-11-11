@@ -3,7 +3,7 @@ use crate::{
     token::{
         is_addr_spec_token, is_header_name_token, is_header_value_ascii,
         is_hostname_byte, is_ipv6_byte, is_reason_phrase_octet, is_token,
-        is_uri_token,
+        is_uri_token, is_word,
     },
 };
 
@@ -144,6 +144,11 @@ pub(crate) fn match_ipv6_vectored(bytes: &mut Bytes<'_>) {
 #[inline]
 pub(crate) fn match_addr_spec_vectored(bytes: &mut Bytes<'_>) {
     match_table_vectored(is_addr_spec_token, bytes);
+}
+
+#[inline]
+pub(crate) fn match_word_vectored(bytes: &mut Bytes<'_>) {
+    match_table_vectored(is_word, bytes);
 }
 
 /// Advances `bytes` over `qdtext`, stopping at the first `"` or `\`.

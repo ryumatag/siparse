@@ -34,6 +34,13 @@ const ADDR_SPEC_MAP: [bool; 256] = byte_map!(
     b'%' | b'[' | b']'
 );
 
+const WORD_MAP: [bool; 256] = byte_map!(
+    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' |
+    b'-' | b'.' | b'!' | b'%' | b'*' | b'_' | b'+' | b'`' | b'\'' | b'~' |
+    b'(' | b')' | b'<' | b'>' | b':' | b'\\' | b'"' | b'/' | b'[' | b']' |
+    b'?' | b'{' | b'}'
+);
+
 const HEADER_VALUE_ASCII_MAP: [bool; 256] = byte_map!(b'\t' | b' '..=b'~');
 
 const REASON_PHRASE_OCTET_MAP: [bool; 256] = byte_map!(
@@ -94,6 +101,24 @@ pub(crate) const fn is_uri_token(b: u8) -> bool {
 #[inline]
 pub(crate) const fn is_addr_spec_token(b: u8) -> bool {
     ADDR_SPEC_MAP[b as usize]
+}
+
+/// Returns whether `b` is valid in an RFC 3261 `word`, the two halves of a
+/// Call-ID.
+///
+/// RFC 3261, Section 25.1:
+///
+/// > ```text
+/// > word  =  1*(alphanum / "-" / "." / "!" / "%" / "*" /
+/// >          "_" / "+" / "`" / "'" / "~" /
+/// >          "(" / ")" / "<" / ">" /
+/// >          ":" / "\" / DQUOTE /
+/// >          "/" / "[" / "]" / "?" /
+/// >          "{" / "}" )
+/// > ```
+#[inline]
+pub(crate) const fn is_word(b: u8) -> bool {
+    WORD_MAP[b as usize]
 }
 
 /// Returns whether `b` is valid in a SIP header field name.

@@ -540,6 +540,8 @@ pub fn check(input: &[u8]) {
 /// * [`value::address`](siparse::value::address) agrees with a list of one.
 /// * [`value::params`](siparse::value::params) agrees with the reference at
 ///   every character boundary.
+/// * [`value::cseq`](siparse::value::cseq) and
+///   [`value::call_id`](siparse::value::call_id) agree with the reference.
 /// * Every part is borrowed from the input.
 pub fn value(input: &[u8]) {
     use siparse::value;
@@ -577,6 +579,21 @@ pub fn value(input: &[u8]) {
         [] => unreachable!("a list yields at least one item"),
     };
     assert_eq!(single, expected, "address {input:?}");
+
+    let cseq = value::cseq(input)
+        .map(|cseq| (cseq.number, cseq.method))
+        .map_err(|err| err.kind());
+    assert_eq!(cseq, reference::cseq(input), "cseq {input:?}");
+    if let Ok((number, method)) = cseq {
+        borrowed_range(input.as_bytes(), number);
+        borrowed_range(input.as_bytes(), method);
+    }
+
+    let call_id = value::call_id(input).map_err(|err| err.kind());
+    assert_eq!(call_id, reference::call_id(input), "call_id {input:?}");
+    if let Ok(call_id) = call_id {
+        borrowed_range(input.as_bytes(), call_id);
+    }
 
     let starts = input.char_indices().map(|(i, _)| i);
     for start in starts.chain([input.len()]) {
@@ -825,6 +842,51 @@ mod reference {
         Ok((address, src.len() - rest.len()))
     }
 
+    /// `1*DIGIT LWS Method` with whitespace around it.
+    pub(crate) fn cseq(src: &str) -> Result<(&str, &str), ErrorKind> {
+        let s = src.as_bytes();
+        let invalid = ErrorKind::CSeq;
+
+        let number_start = skip(s, 0, is_ws);
+        let number_end = skip(s, number_start, |b| b.is_ascii_digit());
+        let method_start = skip(s, number_end, is_ws);
+        let method_end = skip(s, method_start, is_token);
+        if number_end == number_start
+            || method_start == number_end
+            || method_end == method_start
+            || skip(s, method_end, is_ws) != s.len()
+        {
+            return Err(invalid);
+        }
+        Ok((&src[number_start..number_end], &src[method_start..method_end]))
+    }
+
+    /// `word [ "@" word ]` with whitespace around it.
+    pub(crate) fn call_id(src: &str) -> Result<&str, ErrorKind> {
+        fn is_word(b: u8) -> bool {
+            b.is_ascii_alphanumeric()
+                || b"-.!%*_+`'~()<>:\\\"/[]?{}".contains(&b)
+        }
+
+        let s = src.as_bytes();
+        let start = skip(s, 0, is_ws);
+        let mut end = skip(s, start, is_word);
+        if end == start {
+            return Err(ErrorKind::CallId);
+        }
+        if s.get(end) == Some(&b'@') {
+            let host_end = skip(s, end + 1, is_word);
+            if host_end == end + 1 {
+                return Err(ErrorKind::CallId);
+            }
+            end = host_end;
+        }
+        if skip(s, end, is_ws) != s.len() {
+            return Err(ErrorKind::CallId);
+        }
+        Ok(&src[start..end])
+    }
+
     /// A comma-separated list of addresses, ending after the first error.
     pub(crate) fn addresses(src: &str) -> Vec<Result<Address<'_>, ErrorKind>> {
         let s = src.as_bytes();
@@ -878,6 +940,12 @@ mod tests {
             b"sip:b@x?Subject=lunch",
             b"<sip:a@x>;x=",
             b"*",
+            b"314159 INVITE",
+            b" 7\r\n ACK \t",
+            b"1INVITE",
+            b"a84b4c76e66710@pc33.atlanta.example.com",
+            b"<{a}>:\\\"/[b]?@(c)",
+            b"a@b@c",
             b"\xff",
         ] {
             value(seed);
