@@ -70,6 +70,17 @@ pub enum ErrorKind {
     /// This typically means the sender terminates lines with `LF` alone.
     /// RFC 3261 requires `CRLF`.
     BareLf,
+    /// A header value is not a `name-addr` or an `addr-spec`, or a list of
+    /// them, where [`value::address`](crate::value::address) or
+    /// [`value::addresses`](crate::value::addresses) reads one.
+    ///
+    /// This covers the display name, the angle brackets, the URI, and what
+    /// may follow an address. A malformed parameter is a
+    /// [`GenericParam`](ErrorKind::GenericParam) error instead.
+    Address,
+    /// A `;` is not followed by a `generic-param`, which is a `token`
+    /// optionally followed by `=` and a `token`, `host` or `quoted-string`.
+    GenericParam,
     /// The caller-provided header storage is too small to hold every header
     /// row in the head.
     ///
@@ -145,6 +156,18 @@ impl Error {
         Error { kind: ErrorKind::HeaderValue }
     }
 
+    /// Returns an error indicating an invalid `name-addr` or `addr-spec`.
+    #[inline]
+    pub(crate) const fn address() -> Error {
+        Error { kind: ErrorKind::Address }
+    }
+
+    /// Returns an error indicating an invalid `generic-param`.
+    #[inline]
+    pub(crate) const fn generic_param() -> Error {
+        Error { kind: ErrorKind::GenericParam }
+    }
+
     /// Returns an error indicating that the caller-provided header row buffer
     /// was too small to hold all parsed header rows.
     #[inline]
@@ -166,6 +189,8 @@ impl ErrorKind {
             ErrorKind::MissingColon => "missing colon after SIP header name",
             ErrorKind::BareCr => "CR not followed by LF",
             ErrorKind::BareLf => "LF not preceded by CR",
+            ErrorKind::Address => "invalid SIP name-addr or addr-spec",
+            ErrorKind::GenericParam => "invalid SIP generic-param",
             ErrorKind::TooManyHeaders => {
                 "too many SIP headers for provided header buffer"
             }

@@ -13,6 +13,7 @@ mod response;
 mod scan;
 mod status;
 mod uri;
+mod value;
 mod version;
 
 // I `assert_eq!` on every benchmark iteration. For the argument behind
@@ -39,6 +40,8 @@ criterion::criterion_group! {
         head_end::find,
         // Public scans for the elements inside a header value.
         scan::scan,
+        // Public parsers for the productions that header values share.
+        value::value,
         // Crate internals behind the `__bench` feature. These call one
         // production directly, so the compiler
         // inlines it into the benchmark loop instead of into `parse_head`,

@@ -12,10 +12,11 @@ A syntactic parser for SIP message heads in Rust.
 
 <br>
 
-siparse parses SIP request-lines, status-lines, and header rows. It is a
+siparse parses SIP request-lines, status-lines, and header rows, and splits
+header values such as From or Route into the parts RFC 3261 names. It is a
 syntactic parser only and does not perform semantic decoding. Header names
-are not normalized, typed header values are not parsed, and message bodies
-are left to the caller.
+are not normalized, values are never decoded, and message bodies are left to
+the caller.
 
 Every parsed token is a `&str` borrowed from the input buffer, so parsing
 neither copies nor allocates. It works without `std`.

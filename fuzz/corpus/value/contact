@@ -1,0 +1,1 @@
+sip:a@x;expires=60,sip:b@x;q=0.5, <sip:c@x?h=1,2>;received=[2001:db8::2]

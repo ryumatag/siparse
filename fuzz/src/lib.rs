@@ -48,6 +48,18 @@ cargo +nightly fuzz run check \
     -max_total_time=30 -max_len=4096
 ```
 
+The `value` target compares [`siparse::value`] against a reference that
+walks byte indices, on input that is a valid header value. It checks the
+addresses of a list, a single address, and the parameters at every character
+boundary, and that every part is borrowed from the input:
+
+```text
+mkdir -p tmp/fuzz-value
+cargo +nightly fuzz run value \
+    tmp/fuzz-value fuzz/corpus/value -- \
+    -max_total_time=30 -max_len=4096
+```
+
 The harness checks borrowed ranges and initialized rows on every outcome,
 including errors. It compares parsing results across header buffer capacities,
 including zero, exact-fit, and insufficient capacities, using a 16-slot parse
@@ -517,9 +529,360 @@ pub fn check(input: &[u8]) {
     }
 }
 
+/// Checks [`siparse::value`] against a reference that walks byte indices.
+///
+/// The parsers apply to a header value, so input that
+/// [`siparse::check::header_value`] rejects is only checked for borrowed
+/// parts. On the rest:
+///
+/// * [`value::addresses`](siparse::value::addresses) yields the reference's
+///   addresses, parts and parameters, and ends after the same error.
+/// * [`value::address`](siparse::value::address) agrees with a list of one.
+/// * [`value::params`](siparse::value::params) agrees with the reference at
+///   every character boundary.
+/// * Every part is borrowed from the input.
+pub fn value(input: &[u8]) {
+    use siparse::value;
+
+    // Any `&str` is safe to pass, even one that no header value matches.
+    // There the results are unspecified, but every part must be borrowed.
+    let Ok(text) = std::str::from_utf8(input) else {
+        return;
+    };
+    for address in value::addresses(text).flatten() {
+        reference::Address::from(address).check_borrowed(text);
+    }
+
+    let Ok(input) = siparse::check::header_value(input) else {
+        return;
+    };
+
+    let list: Vec<_> = value::addresses(input)
+        .map(|item| item.map(reference::Address::from).map_err(|e| e.kind()))
+        .collect();
+    assert_eq!(list, reference::addresses(input), "addresses {input:?}");
+    for address in list.iter().flatten() {
+        address.check_borrowed(input);
+    }
+
+    let single = value::address(input)
+        .map(reference::Address::from)
+        .map_err(|err| err.kind());
+    let expected = match list.as_slice() {
+        [Ok(address)] => Ok(address.clone()),
+        // A list of more than one is not an address. The reference reports
+        // where the list goes wrong, which for `address` is the `,` already.
+        [Ok(_), ..] => Err(ErrorKind::Address),
+        [Err(kind), ..] => Err(*kind),
+        [] => unreachable!("a list yields at least one item"),
+    };
+    assert_eq!(single, expected, "address {input:?}");
+
+    let starts = input.char_indices().map(|(i, _)| i);
+    for start in starts.chain([input.len()]) {
+        let src = &input[start..];
+        let actual = value::params(src)
+            .map(|(params, rest)| {
+                let list: Vec<_> =
+                    params.iter().map(|p| (p.name, p.value)).collect();
+                (list, params.as_str(), rest)
+            })
+            .map_err(|err| err.kind());
+        assert_eq!(actual, reference::params(src), "params {src:?}");
+        if let Ok((list, text, rest)) = actual {
+            borrowed_range(src.as_bytes(), text);
+            borrowed_range(src.as_bytes(), rest);
+            for (name, value) in list {
+                borrowed_range(text.as_bytes(), name);
+                if let Some(value) = value {
+                    borrowed_range(text.as_bytes(), value);
+                }
+            }
+        }
+    }
+}
+
+/// A scalar reading of the `value` productions, for the `value` target.
+///
+/// It follows RFC 3261 section 25.1 with byte indices and the character
+/// classes written out, independent of `siparse::scan`.
+mod reference {
+    use siparse::{value, ErrorKind};
+
+    use crate::borrowed_range;
+
+    type Param<'a> = (&'a str, Option<&'a str>);
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct Address<'a> {
+        display_name: Option<&'a str>,
+        uri: &'a str,
+        bracketed: bool,
+        params_text: &'a str,
+        params: Vec<Param<'a>>,
+    }
+
+    impl<'a> From<value::Address<'a>> for Address<'a> {
+        fn from(address: value::Address<'a>) -> Address<'a> {
+            Address {
+                display_name: address.display_name,
+                uri: address.uri,
+                bracketed: address.bracketed,
+                params_text: address.params.as_str(),
+                params: address
+                    .params
+                    .iter()
+                    .map(|p| (p.name, p.value))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Address<'_> {
+        pub(crate) fn check_borrowed(&self, input: &str) {
+            let input = input.as_bytes();
+            borrowed_range(input, self.uri);
+            borrowed_range(input, self.params_text);
+            if let Some(display_name) = self.display_name {
+                borrowed_range(input, display_name);
+            }
+            for (name, value) in &self.params {
+                borrowed_range(self.params_text.as_bytes(), name);
+                if let Some(value) = value {
+                    borrowed_range(self.params_text.as_bytes(), value);
+                }
+            }
+        }
+    }
+
+    fn is_ws(b: u8) -> bool {
+        matches!(b, b' ' | b'\t' | b'\r' | b'\n')
+    }
+
+    fn is_token(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b"-.!%*_+`'~".contains(&b)
+    }
+
+    // RFC 2396 `reserved`, `unreserved` and `%`, plus the brackets of an
+    // IPv6 reference.
+    fn is_uri(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b";/?:@&=+$,-_.!~*'()%[]".contains(&b)
+    }
+
+    fn skip(s: &[u8], mut i: usize, accept: fn(u8) -> bool) -> usize {
+        while i < s.len() && accept(s[i]) {
+            i += 1;
+        }
+        i
+    }
+
+    /// The index after the closing quote of a `quoted-string` at `i`.
+    fn quoted_end(s: &[u8], i: usize) -> Option<usize> {
+        let mut i = i + 1;
+        loop {
+            match *s.get(i)? {
+                b'"' => return Some(i + 1),
+                b'\\' => match *s.get(i + 1)? {
+                    b'\r' | b'\n' | 0x80.. => return None,
+                    _ => i += 2,
+                },
+                _ => i += 1,
+            }
+        }
+    }
+
+    fn has_scheme(uri: &str) -> bool {
+        let Some(colon) = uri.find(':') else {
+            return false;
+        };
+        let scheme = &uri.as_bytes()[..colon];
+        !scheme.is_empty()
+            && scheme[0].is_ascii_alphabetic()
+            && scheme.iter().all(|&b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.')
+            })
+            && colon + 1 < uri.len()
+    }
+
+    /// `*( SEMI generic-param )` at the start of `src`.
+    pub(crate) fn params(
+        src: &str,
+    ) -> Result<(Vec<Param<'_>>, &str, &str), ErrorKind> {
+        let s = src.as_bytes();
+        let invalid = ErrorKind::GenericParam;
+        let mut list = Vec::new();
+        let mut first = None;
+        let mut end = 0;
+
+        loop {
+            let semi = skip(s, end, is_ws);
+            if s.get(semi) != Some(&b';') {
+                break;
+            }
+            first.get_or_insert(semi);
+
+            let name_start = skip(s, semi + 1, is_ws);
+            let name_end = skip(s, name_start, is_token);
+            if name_end == name_start {
+                return Err(invalid);
+            }
+            let name = &src[name_start..name_end];
+
+            let eq = skip(s, name_end, is_ws);
+            if s.get(eq) != Some(&b'=') {
+                list.push((name, None));
+                end = name_end;
+                continue;
+            }
+            let value_start = skip(s, eq + 1, is_ws);
+            let value_end = match s.get(value_start) {
+                Some(b'"') => quoted_end(s, value_start).ok_or(invalid)?,
+                Some(b'[') => {
+                    let close = skip(s, value_start + 1, |b| {
+                        b.is_ascii_hexdigit() || b == b':' || b == b'.'
+                    });
+                    if close == value_start + 1 || s.get(close) != Some(&b']')
+                    {
+                        return Err(invalid);
+                    }
+                    close + 1
+                }
+                _ => skip(s, value_start, is_token),
+            };
+            if value_end == value_start {
+                return Err(invalid);
+            }
+            list.push((name, Some(&src[value_start..value_end])));
+            end = value_end;
+        }
+
+        let text = match first {
+            Some(first) => &src[first..end],
+            None => &src[..0],
+        };
+        Ok((list, text, &src[end..]))
+    }
+
+    /// `[ display-name ] LAQUOT addr-spec RAQUOT` at `i`, returning the
+    /// display name, the URI and the index after `>`.
+    fn name_addr(src: &str, i: usize) -> Option<(Option<&str>, &str, usize)> {
+        let s = src.as_bytes();
+        let (display_name, open) = if s.get(i) == Some(&b'"') {
+            let end = quoted_end(s, i)?;
+            (Some(&src[i..end]), skip(s, end, is_ws))
+        } else {
+            let mut at = i;
+            let mut end = i;
+            loop {
+                let token_end = skip(s, at, is_token);
+                if token_end == at {
+                    break;
+                }
+                let after = skip(s, token_end, is_ws);
+                if after == token_end {
+                    return None;
+                }
+                end = token_end;
+                at = after;
+            }
+            ((end > i).then(|| &src[i..end]), at)
+        };
+
+        if s.get(open) != Some(&b'<') {
+            return None;
+        }
+        let close = skip(s, open + 1, is_uri);
+        let uri = &src[open + 1..close];
+        (s.get(close) == Some(&b'>') && has_scheme(uri)).then_some((
+            display_name,
+            uri,
+            close + 1,
+        ))
+    }
+
+    fn address(
+        src: &str,
+        i: usize,
+    ) -> Result<(Address<'_>, usize), ErrorKind> {
+        let s = src.as_bytes();
+        let i = skip(s, i, is_ws);
+
+        let (display_name, uri, bracketed, end) = match name_addr(src, i) {
+            Some((display_name, uri, end)) => (display_name, uri, true, end),
+            None => {
+                let end = skip(s, i, |b| is_uri(b) && !b";,?".contains(&b));
+                let uri = &src[i..end];
+                if end == i || s.get(end) == Some(&b'?') || !has_scheme(uri) {
+                    return Err(ErrorKind::Address);
+                }
+                (None, uri, false, end)
+            }
+        };
+        let (params, params_text, rest) = params(&src[end..])?;
+
+        let address =
+            Address { display_name, uri, bracketed, params_text, params };
+        Ok((address, src.len() - rest.len()))
+    }
+
+    /// A comma-separated list of addresses, ending after the first error.
+    pub(crate) fn addresses(src: &str) -> Vec<Result<Address<'_>, ErrorKind>> {
+        let s = src.as_bytes();
+        let mut list = Vec::new();
+        let mut at = 0;
+
+        loop {
+            let (address, end) = match address(src, at) {
+                Ok(found) => found,
+                Err(kind) => {
+                    list.push(Err(kind));
+                    return list;
+                }
+            };
+            let next = skip(s, end, is_ws);
+            match s.get(next) {
+                None => {
+                    list.push(Ok(address));
+                    return list;
+                }
+                Some(b',') => {
+                    list.push(Ok(address));
+                    at = next + 1;
+                }
+                Some(_) => {
+                    list.push(Err(ErrorKind::Address));
+                    return list;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn value_seeds() {
+        for seed in [
+            &b""[..],
+            b"\"Bob \\\"B\\\" Smith\" <sip:bob@biloxi.example.com>;tag=a6c85cf",
+            b"Alice <sip:alice@atlanta.example.com>;tag=1928301774",
+            b"sip:bob@biloxi.example.com ;\r\n tag = a6c85cf ",
+            b"<sip:p1.example.com;lr>;x=\"a,b\", <sip:[2001:db8::1];lr>",
+            b"sip:a@x;expires=60,sip:b@x;q=0.5, <sip:c@x?h=1,2>",
+            b"\"\xe7\x94\xb0\xe4\xb8\xad\" <sip:tanaka@example.com>",
+            b"<sip:a@x>;received=[2001:db8::2];rport",
+            b"Bob<sip:b@x>",
+            b"<sip:a@x>,,<sip:b@x>",
+            b"sip:b@x?Subject=lunch",
+            b"<sip:a@x>;x=",
+            b"*",
+            b"\xff",
+        ] {
+            value(seed);
+        }
+    }
 
     #[test]
     fn scan_seeds() {

@@ -1,0 +1,60 @@
+use std::hint::black_box as bb;
+
+use criterion::Criterion;
+use siparse::value;
+
+use crate::benchmark;
+
+pub(super) fn value(c: &mut Criterion) {
+    // From and To values in each form, with the tag a dialog needs. The
+    // throughput counts the whole value.
+    let addresses = [
+        ("addr_spec", "sip:alice@atlanta.example.com;tag=1928301774"),
+        ("name_addr", "Alice <sip:alice@atlanta.example.com>;tag=1928301774"),
+        (
+            "quoted",
+            "\"Bob \\\"B\\\" Smith\" <sip:bob@biloxi.example.com>;tag=a6c85cf",
+        ),
+    ];
+
+    for (category, input) in addresses {
+        let uri_len = value::address(input).unwrap().uri.len();
+        benchmark(
+            c,
+            format!("value/address/{category}"),
+            input.len() as u64,
+            |b| {
+                b.iter(|| {
+                    let address = bb(value::address(bb(input))).unwrap();
+                    assert_eq!(address.uri.len(), uri_len);
+                });
+            },
+        );
+    }
+
+    // A Record-Route a proxy chain leaves, read address by address.
+    let route = concat!(
+        "<sip:p1.example.com;lr>, <sip:p2.example.com;lr;transport=tcp>,",
+        "\r\n <sip:[2001:db8::1]:5060;lr>",
+    );
+    benchmark(c, "value/addresses/route", route.len() as u64, |b| {
+        b.iter(|| {
+            let mut count = 0;
+            for item in value::addresses(bb(route)) {
+                bb(item.unwrap());
+                count += 1;
+            }
+            assert_eq!(count, 3);
+        });
+    });
+
+    // Parameters as they follow a Via's `sent-by`, read and walked.
+    let params = ";branch=z9hG4bK776asdhds;rport;received=192.0.2.4;ttl=16";
+    benchmark(c, "value/params/typical", params.len() as u64, |b| {
+        b.iter(|| {
+            let (list, rest) = bb(value::params(bb(params))).unwrap();
+            assert_eq!(list.iter().count(), 4);
+            assert_eq!(rest, "");
+        });
+    });
+}

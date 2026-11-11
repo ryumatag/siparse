@@ -1,8 +1,9 @@
 use crate::{
     iter::Bytes,
     token::{
-        is_header_name_token, is_header_value_ascii, is_hostname_byte,
-        is_ipv6_byte, is_reason_phrase_octet, is_token, is_uri_token,
+        is_addr_spec_token, is_header_name_token, is_header_value_ascii,
+        is_hostname_byte, is_ipv6_byte, is_reason_phrase_octet, is_token,
+        is_uri_token,
     },
 };
 
@@ -136,6 +137,13 @@ pub(crate) fn match_hostname_vectored(bytes: &mut Bytes<'_>) {
 #[inline]
 pub(crate) fn match_ipv6_vectored(bytes: &mut Bytes<'_>) {
     match_table_vectored(is_ipv6_byte, bytes);
+}
+
+// The `addr-spec` scan for `crate::value`. A URI in angle brackets uses the
+// head parser's URI scan.
+#[inline]
+pub(crate) fn match_addr_spec_vectored(bytes: &mut Bytes<'_>) {
+    match_table_vectored(is_addr_spec_token, bytes);
 }
 
 /// Advances `bytes` over `qdtext`, stopping at the first `"` or `\`.

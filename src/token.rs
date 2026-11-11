@@ -25,6 +25,15 @@ const URI_TOKEN_MAP: [bool; 256] = byte_map!(
     b'%' | b'[' | b']'
 );
 
+// The URI set without the three bytes that RFC 3261 section 20 only allows
+// in a URI inside angle brackets.
+const ADDR_SPEC_MAP: [bool; 256] = byte_map!(
+    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' |
+    b'/' | b':' | b'@' | b'&' | b'=' | b'+' | b'$' |
+    b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')' |
+    b'%' | b'[' | b']'
+);
+
 const HEADER_VALUE_ASCII_MAP: [bool; 256] = byte_map!(b'\t' | b' '..=b'~');
 
 const REASON_PHRASE_OCTET_MAP: [bool; 256] = byte_map!(
@@ -73,6 +82,18 @@ pub(crate) const fn is_method_token(b: u8) -> bool {
 #[inline]
 pub(crate) const fn is_uri_token(b: u8) -> bool {
     URI_TOKEN_MAP[b as usize]
+}
+
+/// Returns whether `b` is accepted in an `addr-spec` that is not in angle
+/// brackets.
+///
+/// This is the [`is_uri_token`] set without `;`, `,` and `?`. RFC 3261
+/// section 20 requires the `name-addr` form for a URI that contains any of
+/// them, so outside brackets `;` starts the header parameters and `,` the
+/// next element of a list.
+#[inline]
+pub(crate) const fn is_addr_spec_token(b: u8) -> bool {
+    ADDR_SPEC_MAP[b as usize]
 }
 
 /// Returns whether `b` is valid in a SIP header field name.

@@ -3,9 +3,10 @@ siparse is a syntactic parser for SIP message heads. It parses the
 request-line or status-line and the header rows that follow.
 
 It does not perform semantic decoding. Header names are not normalized, compact
-forms such as `v` for `Via` are not expanded, typed header values are not
-parsed, and folded values are returned raw. Message bodies, including
-`Content-Length` handling, are left to the caller.
+forms such as `v` for `Via` are not expanded, and folded values are returned
+raw. A header value can be split into the parts its grammar names, but nothing
+in it is converted or decoded. Message bodies, including `Content-Length`
+handling, are left to the caller.
 
 Every token is returned as a `&str` borrowed from the caller's input buffer,
 and header rows are written into storage that the caller provides. Parsing
@@ -156,6 +157,16 @@ takes the rest of a value and returns the element at its start as a `&str`,
 together with what follows it. What an element means is still left to the
 consumer.
 
+# Reading addresses and parameters
+
+The [`value`] module parses the productions that several header grammars share
+from those elements. [`value::address`] reads a From or To value, and
+[`value::addresses`] a Contact, Route or Record-Route list, into the display
+name, the URI and the header parameters. [`value::params`] reads the
+`generic-param`s that end many other headers. Each part is a `&str` as written,
+and RFC 3261 is followed strictly. Unquoting, decoding, and deciding which
+production a header takes are left to the consumer.
+
 # Parsing policy
 
 ### Header values
@@ -277,6 +288,7 @@ pub mod scan;
 mod simd;
 mod token;
 mod utf8;
+pub mod value;
 
 #[doc(inline)]
 pub use self::{

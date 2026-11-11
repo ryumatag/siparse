@@ -227,7 +227,10 @@ pub fn quoted_string(src: &str) -> Option<(&str, &str)> {
 ///
 /// The scans only consume ASCII, so the split is on a character boundary.
 #[inline(always)]
-fn split_run(src: &str, scan: fn(&mut Bytes<'_>)) -> Option<(&str, &str)> {
+pub(crate) fn split_run(
+    src: &str,
+    scan: fn(&mut Bytes<'_>),
+) -> Option<(&str, &str)> {
     let mut bytes = Bytes::new(src.as_bytes());
     scan(&mut bytes);
     let n = bytes.pos();
