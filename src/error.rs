@@ -81,6 +81,13 @@ pub enum ErrorKind {
     /// A `;` is not followed by a `generic-param`, which is a `token`
     /// optionally followed by `=` and a `token`, `host` or `quoted-string`.
     GenericParam,
+    /// A Via value is not a list of `via-parm`s, where
+    /// [`value::via_parms`](crate::value::via_parms) reads one.
+    ///
+    /// This covers `sent-protocol`, `sent-by` and what may follow a
+    /// `via-parm`. A malformed parameter is a
+    /// [`GenericParam`](ErrorKind::GenericParam) error instead.
+    Via,
     /// A CSeq value is not `1*DIGIT LWS Method`, where
     /// [`value::cseq`](crate::value::cseq) reads one.
     CSeq,
@@ -174,6 +181,12 @@ impl Error {
         Error { kind: ErrorKind::GenericParam }
     }
 
+    /// Returns an error indicating an invalid `via-parm`.
+    #[inline]
+    pub(crate) const fn via() -> Error {
+        Error { kind: ErrorKind::Via }
+    }
+
     /// Returns an error indicating an invalid CSeq value.
     #[inline]
     pub(crate) const fn cseq() -> Error {
@@ -209,6 +222,7 @@ impl ErrorKind {
             ErrorKind::BareLf => "LF not preceded by CR",
             ErrorKind::Address => "invalid SIP name-addr or addr-spec",
             ErrorKind::GenericParam => "invalid SIP generic-param",
+            ErrorKind::Via => "invalid SIP via-parm",
             ErrorKind::CSeq => "invalid SIP CSeq",
             ErrorKind::CallId => "invalid SIP Call-ID",
             ErrorKind::TooManyHeaders => {

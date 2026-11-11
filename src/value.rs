@@ -6,8 +6,9 @@ or a `quoted-string`. The functions here put them together into the productions
 that several header grammars share, and return each part as written. From, To,
 Contact, Route, Record-Route and Reply-To all hold a `name-addr` or an
 `addr-spec` followed by `generic-param`s, so [`address`] and [`addresses`] read
-any of them. [`cseq`] and [`call_id`] read the two values that, with the tags in
-From and To, tell which request and which dialog a message belongs to.
+any of them. [`via_parms`] reads the values of a Via, and [`cseq`] and
+[`call_id`] the two values that, with the tags in From and To, tell which
+request and which dialog a message belongs to.
 
 # Example
 
@@ -122,14 +123,15 @@ pub struct Param<'a> {
     /// The name, in the case it was written in.
     pub name: &'a str,
     /// The value as written, if there is one. A quoted value keeps its quotes
-    /// and an IPv6 reference its brackets.
+    /// and an IPv6 reference its brackets. A `received` of a [`ViaParm`] may
+    /// also be an IPv6 address without brackets.
     pub value: Option<&'a str>,
 }
 
 /// A run of `generic-param`s, each after a `;`, that has been checked.
 ///
-/// [`params`] returns one, and so does each [`Address`]. Iterating it yields
-/// each [`Param`] in order.
+/// [`params`] returns one, and so does each [`Address`] and [`ViaParm`].
+/// Iterating it yields each [`Param`] in order.
 ///
 /// Two `Params` are equal when they are written the same, whitespace
 /// included, so `;a=1` and ` ; a=1` differ. Compare their iterators to
@@ -201,9 +203,7 @@ impl<'a> Iterator for ParamsIter<'a> {
 
     #[inline]
     fn next(&mut self) -> Option<Param<'a>> {
-        // `Params` was checked when it was made, so this only ends at the end
-        // of it.
-        let (param, rest) = generic_param(self.rest)?;
+        let (param, rest) = checked_param(self.rest)?;
         self.rest = rest;
         Some(param)
     }
@@ -243,6 +243,19 @@ impl FusedIterator for ParamsIter<'_> {}
 /// ```
 #[inline]
 pub fn params(src: &str) -> Result<(Params<'_>, &str), Error> {
+    params_of(src, generic_param)
+}
+
+/// Reads a run of parameters from the start of `src`, each with `read`, as
+/// [`params`] does.
+///
+/// It is always inlined, so that each caller gets a loop over its own
+/// reader.
+#[inline(always)]
+fn params_of(
+    src: &str,
+    read: fn(&str) -> Option<(Param<'_>, &str)>,
+) -> Result<(Params<'_>, &str), Error> {
     let start = src.len() - scan::sws(src).len();
     let mut rest = src;
 
@@ -250,7 +263,7 @@ pub fn params(src: &str) -> Result<(Params<'_>, &str), Error> {
     // is an error rather than the end of the run, since nothing else in a
     // header grammar starts with one.
     while scan::sws(rest).starts_with(';') {
-        let (_, tail) = generic_param(rest).ok_or(Error::generic_param())?;
+        let (_, tail) = read(rest).ok_or(Error::generic_param())?;
         rest = tail;
     }
 
@@ -347,7 +360,7 @@ pub fn address(src: &str) -> Result<Address<'_>, Error> {
 /// ```
 #[inline]
 pub fn addresses(src: &str) -> Addresses<'_> {
-    Addresses { rest: Some(src) }
+    Addresses { list: List::new(src) }
 }
 
 /// An iterator over the addresses of a header value.
@@ -355,31 +368,94 @@ pub fn addresses(src: &str) -> Addresses<'_> {
 /// See [`addresses`].
 #[derive(Clone, Debug)]
 pub struct Addresses<'a> {
-    /// What is left of the value, or `None` once the list has ended.
-    rest: Option<&'a str>,
+    list: List<'a>,
+}
+
+impl<'a> Addresses<'a> {
+    /// Returns what is left of the value after the addresses read so far.
+    ///
+    /// After an address that a `,` follows, this is the rest of the value
+    /// past the `,`, as written, whitespace included. A proxy that removes
+    /// the top Route value (RFC 3261 section 16.4) writes this back. Once
+    /// the list has ended, by its last address or by an error, it is empty.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use siparse::value;
+    ///
+    /// let mut routes = value::addresses("<sip:p1.example.com;lr>, <sip:p2.example.com;lr>");
+    /// routes.next().unwrap()?;
+    /// assert_eq!(routes.as_str(), " <sip:p2.example.com;lr>");
+    /// # Ok::<(), siparse::Error>(())
+    /// ```
+    #[inline]
+    pub fn as_str(&self) -> &'a str {
+        self.list.rest
+    }
 }
 
 impl<'a> Iterator for Addresses<'a> {
     type Item = Result<Address<'a>, Error>;
 
     fn next(&mut self) -> Option<Result<Address<'a>, Error>> {
-        let rest = self.rest.take()?;
-
-        let (address, tail) = match address_prefix(rest) {
-            Ok(found) => found,
-            Err(err) => return Some(Err(err)),
-        };
-        let tail = scan::sws(tail);
-        if let Some(next) = tail.strip_prefix(',') {
-            self.rest = Some(next);
-        } else if !tail.is_empty() {
-            return Some(Err(Error::address()));
-        }
-        Some(Ok(address))
+        self.list.next(address_prefix, Error::address())
     }
 }
 
 impl FusedIterator for Addresses<'_> {}
+
+/// The state of a comma-separated list, shared by [`Addresses`] and
+/// [`ViaParms`].
+#[derive(Clone, Debug)]
+struct List<'a> {
+    /// What is left of the value. It is an empty slice at the end of the
+    /// value once the list has ended, so that it still points into it.
+    rest: &'a str,
+    /// Whether the list has ended, after its last element or an error.
+    done: bool,
+}
+
+impl<'a> List<'a> {
+    #[inline]
+    fn new(src: &'a str) -> List<'a> {
+        List { rest: src, done: false }
+    }
+
+    /// Reads the next element with `read`, then the `,` or the end of the
+    /// value after it. `invalid` is the error for anything else there.
+    #[inline]
+    fn next<T>(
+        &mut self,
+        read: fn(&'a str) -> Result<(T, &'a str), Error>,
+        invalid: Error,
+    ) -> Option<Result<T, Error>> {
+        if self.done {
+            return None;
+        }
+
+        let result = read(self.rest).and_then(|(element, tail)| {
+            let tail = scan::sws(tail);
+            match tail.strip_prefix(',') {
+                Some(next) => {
+                    self.rest = next;
+                    Ok(element)
+                }
+                None if tail.is_empty() => {
+                    self.done = true;
+                    self.rest = tail;
+                    Ok(element)
+                }
+                None => Err(invalid),
+            }
+        });
+        if result.is_err() {
+            self.done = true;
+            self.rest = &self.rest[self.rest.len()..];
+        }
+        Some(result)
+    }
+}
 
 /// Reads an address and its parameters from the start of `src`, returning
 /// what follows them.
@@ -465,6 +541,72 @@ fn has_scheme(uri: &str) -> bool {
         }
     }
     false
+}
+
+/// Reads the next parameter of a [`Params`], with the `;` before it.
+///
+/// The parameters were checked when the `Params` was made, by
+/// [`generic_param`] or [`via_param`]. Every value either grammar accepts is
+/// a `quoted-string` or ends at whitespace or a `;`, so this one reader
+/// splits both, and `Params` need not say which grammar it holds. Keeping
+/// that in `Params` grew [`Address`] by eight bytes and made
+/// `value/address/*` about 9% slower.
+#[inline]
+fn checked_param(src: &str) -> Option<(Param<'_>, &str)> {
+    let rest = scan::separator(src, ';')?;
+    let (name, rest) = scan::token(rest)?;
+
+    let Some(value) = scan::separator(rest, '=') else {
+        return Some((Param { name, value: None }, rest));
+    };
+    let (value, rest) = if value.starts_with('"') {
+        scan::quoted_string(value)?
+    } else {
+        let end = value
+            .bytes()
+            .position(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n' | b';'))
+            .unwrap_or(value.len());
+        value.split_at(end)
+    };
+    Some((Param { name, value: Some(value) }, rest))
+}
+
+/// Reads `SEMI via-params` from the start of `src`, returning the parameter
+/// and what follows it.
+///
+/// RFC 3261, Section 25.1:
+///
+/// ```text
+/// via-params    =  via-ttl / via-maddr / via-received / via-branch
+///                  / via-extension
+/// via-received  =  "received" EQUAL (IPv4address / IPv6address)
+/// via-extension =  generic-param
+/// ```
+///
+/// Every alternative but one is also a `generic-param`. `via-received` is
+/// not, since its `IPv6address` has no brackets and holds `:`. A `received`
+/// that a `generic-param` reads, such as a bracketed address, still matches
+/// `via-extension`.
+#[inline]
+fn via_param(src: &str) -> Option<(Param<'_>, &str)> {
+    let rest = scan::separator(src, ';')?;
+    let (name, rest) = scan::token(rest)?;
+
+    if name.eq_ignore_ascii_case("received") {
+        if let Some(value) = scan::separator(rest, '=') {
+            // A run with a `:` is no `token`, so it can only be an address.
+            // Like `scan::host`, this checks the character class only.
+            if let Some((address, rest)) =
+                split_run(value, simd::match_ipv6_vectored)
+            {
+                if address.contains(':') {
+                    return Some((Param { name, value: Some(address) }, rest));
+                }
+            }
+        }
+    }
+
+    generic_param(src)
 }
 
 /// Reads `SEMI generic-param` from the start of `src`, returning the
@@ -585,6 +727,150 @@ pub fn call_id(src: &str) -> Result<&str, Error> {
     }
 
     Ok(&src[..src.len() - rest.len()])
+}
+
+/// A `via-parm`, one value of a Via header.
+///
+/// RFC 3261, Section 25.1:
+///
+/// ```text
+/// via-parm       =  sent-protocol LWS sent-by *( SEMI via-params )
+/// sent-protocol  =  protocol-name SLASH protocol-version SLASH transport
+/// sent-by        =  host [ COLON port ]
+/// ```
+///
+/// Like [`Params`], two values are equal when they are written the same.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ViaParm<'a> {
+    /// The `protocol-name`, such as `SIP`.
+    pub protocol: &'a str,
+    /// The `protocol-version`, such as `2.0`.
+    pub version: &'a str,
+    /// The `transport`, such as `UDP`.
+    pub transport: &'a str,
+    /// The `host` of `sent-by` as written, so an IPv6 reference keeps its
+    /// brackets.
+    pub host: &'a str,
+    /// The `port` of `sent-by` as written, if there is one. Converting it,
+    /// and choosing the default when there is none, is up to the caller.
+    pub port: Option<&'a str>,
+    /// The parameters after `sent-by`, such as `branch` and `received`.
+    pub params: Params<'a>,
+    /// The whole `via-parm` as written, from the protocol name to the end of
+    /// the last parameter.
+    ///
+    /// A server that adds `received` or a value for `rport` (RFC 3261
+    /// section 18.2.1, RFC 3581) inserts it where this ends.
+    pub text: &'a str,
+}
+
+/// Iterates over the `via-parm`s of a Via value, from the topmost down.
+///
+/// RFC 3261, Section 25.1:
+///
+/// ```text
+/// Via  =  ( "Via" / "v" ) HCOLON via-parm *(COMMA via-parm)
+/// ```
+///
+/// As with [`addresses`], each item is a value or the error that ends the
+/// list, and a list has at least one value. The parameters are
+/// `generic-param`s, except that a `received` may also be an IPv6 address
+/// without brackets, as `via-received` has it.
+///
+/// # Errors
+///
+/// An item is an [`ErrorKind::Via`](crate::ErrorKind::Via) error where the
+/// list does not go on with a `via-parm`, and an
+/// [`ErrorKind::GenericParam`](crate::ErrorKind::GenericParam) error where a
+/// parameter is malformed.
+///
+/// # Example
+///
+/// ```
+/// use siparse::value;
+///
+/// let value = "SIP/2.0/UDP pc33.atlanta.example.com:5060;branch=z9hG4bK776asdhds\
+///              ;received=2001:db8::9, SIP/2.0/TCP [2001:db8::1]";
+/// let mut vias = value::via_parms(value);
+///
+/// let top = vias.next().unwrap()?;
+/// assert_eq!((top.protocol, top.version, top.transport), ("SIP", "2.0", "UDP"));
+/// assert_eq!((top.host, top.port), ("pc33.atlanta.example.com", Some("5060")));
+/// let received = top.params.iter().find(|param| param.name == "received");
+/// assert_eq!(received.and_then(|param| param.value), Some("2001:db8::9"));
+///
+/// // What a proxy that removes its own Via value writes back.
+/// assert_eq!(vias.as_str(), " SIP/2.0/TCP [2001:db8::1]");
+///
+/// let next = vias.next().unwrap()?;
+/// assert_eq!((next.host, next.port), ("[2001:db8::1]", None));
+/// assert!(vias.next().is_none());
+/// # Ok::<(), siparse::Error>(())
+/// ```
+#[inline]
+pub fn via_parms(src: &str) -> ViaParms<'_> {
+    ViaParms { list: List::new(src) }
+}
+
+/// An iterator over the `via-parm`s of a Via value.
+///
+/// See [`via_parms`].
+#[derive(Clone, Debug)]
+pub struct ViaParms<'a> {
+    list: List<'a>,
+}
+
+impl<'a> ViaParms<'a> {
+    /// Returns what is left of the value after the `via-parm`s read so far.
+    ///
+    /// After a value that a `,` follows, this is the rest of the value past
+    /// the `,`, as written, whitespace included. A proxy that removes its own
+    /// Via value from a response (RFC 3261 section 16.7) writes this back.
+    /// Once the list has ended, by its last value or by an error, it is
+    /// empty.
+    #[inline]
+    pub fn as_str(&self) -> &'a str {
+        self.list.rest
+    }
+}
+
+impl<'a> Iterator for ViaParms<'a> {
+    type Item = Result<ViaParm<'a>, Error>;
+
+    fn next(&mut self) -> Option<Result<ViaParm<'a>, Error>> {
+        self.list.next(via_parm_prefix, Error::via())
+    }
+}
+
+impl FusedIterator for ViaParms<'_> {}
+
+/// Reads a `via-parm` from the start of `src`, returning what follows it.
+fn via_parm_prefix(src: &str) -> Result<(ViaParm<'_>, &str), Error> {
+    let invalid = Error::via();
+    let src = scan::sws(src);
+
+    // SLASH is `SWS "/" SWS`, so whitespace may sit around each `/`.
+    let (protocol, rest) = scan::token(src).ok_or(invalid)?;
+    let rest = scan::separator(rest, '/').ok_or(invalid)?;
+    let (version, rest) = scan::token(rest).ok_or(invalid)?;
+    let rest = scan::separator(rest, '/').ok_or(invalid)?;
+    let (transport, rest) = scan::token(rest).ok_or(invalid)?;
+
+    let rest = scan::lws(rest).ok_or(invalid)?;
+    let (host, rest) = scan::host(rest).ok_or(invalid)?;
+    let (port, rest) = match scan::separator(rest, ':') {
+        Some(after) => {
+            let (port, rest) = scan::digits(after).ok_or(invalid)?;
+            (Some(port), rest)
+        }
+        None => (None, rest),
+    };
+    let (params, rest) = params_of(rest, via_param)?;
+
+    let text = &src[..src.len() - rest.len()];
+    let via =
+        ViaParm { protocol, version, transport, host, port, params, text };
+    Ok((via, rest))
 }
 
 #[cfg(test)]
@@ -1121,6 +1407,193 @@ mod tests {
                     expected,
                     "{src:?}"
                 );
+            }
+        }
+    }
+
+    fn via_list(src: &str) -> Result<Vec<ViaParm<'_>>, ErrorKind> {
+        via_parms(src).collect::<Result<_, _>>().map_err(|err| err.kind())
+    }
+
+    #[test]
+    fn via_parms_come_in_every_form() {
+        let cases = [
+            (
+                "SIP/2.0/UDP pc33.atlanta.example.com:5060;branch=z9hG4bK776asdhds",
+                ("SIP", "2.0", "UDP"),
+                ("pc33.atlanta.example.com", Some("5060")),
+                ";branch=z9hG4bK776asdhds",
+            ),
+            ("SIP/2.0/TCP 192.0.2.4", ("SIP", "2.0", "TCP"), ("192.0.2.4", None), ""),
+            (
+                "SIP/2.0/TLS [2001:db8::1]:5061;rport",
+                ("SIP", "2.0", "TLS"),
+                ("[2001:db8::1]", Some("5061")),
+                ";rport",
+            ),
+            (
+                " sip / 2.0 /\r\n udp \t host : 5060 ;\r\n branch = z9hG4bK1 ",
+                ("sip", "2.0", "udp"),
+                ("host", Some("5060")),
+                ";\r\n branch = z9hG4bK1",
+            ),
+            ("X-P/9/X-T h", ("X-P", "9", "X-T"), ("h", None), ""),
+        ];
+
+        for (src, protocol, sent_by, params) in cases {
+            let list =
+                via_list(src).unwrap_or_else(|err| panic!("{src:?}: {err:?}"));
+            let [via] = list.as_slice() else { panic!("{src:?}: {list:?}") };
+            assert_eq!(
+                (via.protocol, via.version, via.transport),
+                protocol,
+                "{src:?}"
+            );
+            assert_eq!((via.host, via.port), sent_by, "{src:?}");
+            assert_eq!(via.params.as_str(), params, "{src:?}");
+            assert_eq!(
+                via.text,
+                src.trim_matches([' ', '\t', '\r', '\n']),
+                "{src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn via_received_may_be_a_bare_address() {
+        let src = "SIP/2.0/UDP h;received=2001:db8::9;RECEIVED=192.0.2.4;\
+                   received=[2001:db8::2];rport=5060;ttl=16;maddr=239.255.255.1";
+        let list = via_list(src).unwrap();
+        assert_eq!(
+            list[0].params.iter().collect::<Vec<_>>(),
+            [
+                param("received", Some("2001:db8::9")),
+                param("RECEIVED", Some("192.0.2.4")),
+                param("received", Some("[2001:db8::2]")),
+                param("rport", Some("5060")),
+                param("ttl", Some("16")),
+                param("maddr", Some("239.255.255.1")),
+            ]
+        );
+
+        // Only Via has `via-received`. Elsewhere it is a `generic-param`.
+        assert_eq!(
+            address("<sip:a@x>;received=2001:db8::9")
+                .map_err(|err| err.kind()),
+            Err(ErrorKind::Address)
+        );
+        assert_eq!(
+            via_list("SIP/2.0/UDP h;x=2001:db8::9"),
+            Err(ErrorKind::Via)
+        );
+    }
+
+    #[test]
+    fn via_lists_and_what_is_left() {
+        let src = "SIP/2.0/UDP a;branch=z9hG4bK1;x=\"q,;\" ,\r\n SIP/2.0/TCP b:5060 , SIP/2.0/UDP c";
+        let mut vias = via_parms(src);
+        assert_eq!(vias.as_str(), src);
+
+        let top = vias.next().unwrap().unwrap();
+        assert_eq!(top.text, "SIP/2.0/UDP a;branch=z9hG4bK1;x=\"q,;\"");
+        assert_eq!(vias.as_str(), "\r\n SIP/2.0/TCP b:5060 , SIP/2.0/UDP c");
+
+        let second = vias.next().unwrap().unwrap();
+        assert_eq!(second.text, "SIP/2.0/TCP b:5060");
+        assert_eq!(vias.as_str(), " SIP/2.0/UDP c");
+
+        let last = vias.next().unwrap().unwrap();
+        assert_eq!(last.host, "c");
+        assert_eq!(vias.as_str(), "");
+        assert_borrowed(src, vias.as_str());
+        assert!(vias.next().is_none());
+    }
+
+    #[test]
+    fn malformed_via_parms() {
+        for src in [
+            "",
+            " ",
+            "SIP/2.0/UDP",
+            "SIP/2.0/UDP ",
+            "SIP/2.0 UDP host",
+            "SIP/2.0/UDPhost",
+            "SIP//UDP host",
+            "SIP/2.0/UDP host:",
+            "SIP/2.0/UDP host:abc",
+            "SIP/2.0/UDP [::1",
+            "SIP/2.0/UDP _host",
+            "SIP/2.0/UDP host junk",
+            "SIP/2.0/UDP host,",
+            ", SIP/2.0/UDP host",
+            "SIP/2.0/UDP a,,SIP/2.0/UDP b",
+            "SIP/2.0/UDP h\u{e9}",
+        ] {
+            assert_eq!(via_list(src), Err(ErrorKind::Via), "{src:?}");
+        }
+
+        for src in [
+            "SIP/2.0/UDP host;",
+            "SIP/2.0/UDP host;branch=",
+            "SIP/2.0/UDP host;received=",
+            "SIP/2.0/UDP host;x=\"open",
+        ] {
+            assert_eq!(via_list(src), Err(ErrorKind::GenericParam), "{src:?}");
+        }
+
+        // An extension value outside `generic-param` ends the value early.
+        assert_eq!(via_list("SIP/2.0/UDP host;x=a/b"), Err(ErrorKind::Via));
+    }
+
+    #[test]
+    fn a_failed_list_leaves_nothing() {
+        let src = "SIP/2.0/UDP a, junk";
+        let mut vias = via_parms(src);
+        assert!(vias.next().unwrap().is_ok());
+        assert!(vias.next().unwrap().is_err());
+        assert_eq!(vias.as_str(), "");
+        assert_borrowed(src, vias.as_str());
+        assert!(vias.next().is_none());
+
+        let mut list = addresses("<sip:a@x> junk");
+        assert!(list.next().unwrap().is_err());
+        assert_eq!(list.as_str(), "");
+    }
+
+    #[test]
+    fn addresses_show_what_is_left() {
+        let src = "<sip:p1@x;lr>, \"B, b\" <sip:p2@x;lr>";
+        let mut list = addresses(src);
+        assert_eq!(list.as_str(), src);
+        list.next().unwrap().unwrap();
+        assert_eq!(list.as_str(), " \"B, b\" <sip:p2@x;lr>");
+        list.next().unwrap().unwrap();
+        assert_eq!(list.as_str(), "");
+        assert_borrowed(src, list.as_str());
+    }
+
+    #[test]
+    fn every_via_prefix_parses_or_fails_cleanly() {
+        let value = "SIP/2.0/UDP [2001:db8::1]:5060;branch=z9hG4bK1;received=2001:db8::9;x=\"\u{7530};,\", SIP/2.0/TCP h";
+        let ends = value.char_indices().map(|(i, _)| i);
+        for end in ends.chain([value.len()]) {
+            let src = &value[..end];
+            let mut vias = via_parms(src);
+            while let Some(item) = vias.next() {
+                assert_borrowed(src, vias.as_str());
+                let Ok(via) = item else { continue };
+                for part in [
+                    via.protocol,
+                    via.version,
+                    via.transport,
+                    via.host,
+                    via.text,
+                ] {
+                    assert_borrowed(src, part);
+                }
+                for param in via.params {
+                    assert_borrowed(via.text, param.name);
+                }
             }
         }
     }

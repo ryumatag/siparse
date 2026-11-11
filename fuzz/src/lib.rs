@@ -540,6 +540,8 @@ pub fn check(input: &[u8]) {
 /// * [`value::address`](siparse::value::address) agrees with a list of one.
 /// * [`value::params`](siparse::value::params) agrees with the reference at
 ///   every character boundary.
+/// * [`value::via_parms`](siparse::value::via_parms) agrees with the
+///   reference, and both list iterators leave the same rest after each item.
 /// * [`value::cseq`](siparse::value::cseq) and
 ///   [`value::call_id`](siparse::value::call_id) agree with the reference.
 /// * Every part is borrowed from the input.
@@ -559,13 +561,32 @@ pub fn value(input: &[u8]) {
         return;
     };
 
-    let list: Vec<_> = value::addresses(input)
-        .map(|item| item.map(reference::Address::from).map_err(|e| e.kind()))
-        .collect();
-    assert_eq!(list, reference::addresses(input), "addresses {input:?}");
-    for address in list.iter().flatten() {
-        address.check_borrowed(input);
+    let mut list = Vec::new();
+    let mut addresses = value::addresses(input);
+    while let Some(item) = addresses.next() {
+        borrowed_range(input.as_bytes(), addresses.as_str());
+        let item = item.map(reference::Address::from).map_err(|e| e.kind());
+        list.push((item, addresses.as_str()));
     }
+    assert_eq!(list, reference::addresses(input), "addresses {input:?}");
+    for (address, _) in &list {
+        if let Ok(address) = address {
+            address.check_borrowed(input);
+        }
+    }
+    let list: Vec<_> = list.into_iter().map(|(item, _)| item).collect();
+
+    let mut vias = Vec::new();
+    let mut parms = value::via_parms(input);
+    while let Some(item) = parms.next() {
+        borrowed_range(input.as_bytes(), parms.as_str());
+        let item = item.map(reference::Via::from).map_err(|e| e.kind());
+        if let Ok(via) = &item {
+            via.check_borrowed(input);
+        }
+        vias.push((item, parms.as_str()));
+    }
+    assert_eq!(vias, reference::via_parms(input), "via_parms {input:?}");
 
     let single = value::address(input)
         .map(reference::Address::from)
@@ -725,6 +746,15 @@ mod reference {
     pub(crate) fn params(
         src: &str,
     ) -> Result<(Vec<Param<'_>>, &str, &str), ErrorKind> {
+        params_of(src, false)
+    }
+
+    /// `*( SEMI generic-param )`, or `*( SEMI via-params )` when `via` is
+    /// set, which adds a `received` that holds a bare IPv6 address.
+    fn params_of(
+        src: &str,
+        via: bool,
+    ) -> Result<(Vec<Param<'_>>, &str, &str), ErrorKind> {
         let s = src.as_bytes();
         let invalid = ErrorKind::GenericParam;
         let mut list = Vec::new();
@@ -752,7 +782,16 @@ mod reference {
                 continue;
             }
             let value_start = skip(s, eq + 1, is_ws);
+            let bare = skip(s, value_start, |b| {
+                b.is_ascii_hexdigit() || b == b':' || b == b'.'
+            });
             let value_end = match s.get(value_start) {
+                _ if via
+                    && name.eq_ignore_ascii_case("received")
+                    && src[value_start..bare].contains(':') =>
+                {
+                    bare
+                }
                 Some(b'"') => quoted_end(s, value_start).ok_or(invalid)?,
                 Some(b'[') => {
                     let close = skip(s, value_start + 1, |b| {
@@ -887,36 +926,177 @@ mod reference {
         Ok(&src[start..end])
     }
 
-    /// A comma-separated list of addresses, ending after the first error.
-    pub(crate) fn addresses(src: &str) -> Vec<Result<Address<'_>, ErrorKind>> {
+    /// Reads one list element at an index, returning it and its end.
+    type Read<'a, T> = fn(&'a str, usize) -> Result<(T, usize), ErrorKind>;
+
+    /// A comma-separated list read by `read`, ending after the first error.
+    /// Each item comes with what is left of the value after it.
+    fn list<'a, T>(
+        src: &'a str,
+        read: Read<'a, T>,
+        invalid: ErrorKind,
+    ) -> Vec<(Result<T, ErrorKind>, &'a str)> {
         let s = src.as_bytes();
         let mut list = Vec::new();
         let mut at = 0;
 
         loop {
-            let (address, end) = match address(src, at) {
+            let (element, end) = match read(src, at) {
                 Ok(found) => found,
                 Err(kind) => {
-                    list.push(Err(kind));
+                    list.push((Err(kind), ""));
                     return list;
                 }
             };
             let next = skip(s, end, is_ws);
             match s.get(next) {
                 None => {
-                    list.push(Ok(address));
+                    list.push((Ok(element), ""));
                     return list;
                 }
                 Some(b',') => {
-                    list.push(Ok(address));
+                    list.push((Ok(element), &src[next + 1..]));
                     at = next + 1;
                 }
                 Some(_) => {
-                    list.push(Err(ErrorKind::Address));
+                    list.push((Err(invalid), ""));
                     return list;
                 }
             }
         }
+    }
+
+    pub(crate) fn addresses(
+        src: &str,
+    ) -> Vec<(Result<Address<'_>, ErrorKind>, &str)> {
+        list(src, address, ErrorKind::Address)
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct Via<'a> {
+        protocol: &'a str,
+        version: &'a str,
+        transport: &'a str,
+        host: &'a str,
+        port: Option<&'a str>,
+        params_text: &'a str,
+        params: Vec<Param<'a>>,
+        text: &'a str,
+    }
+
+    impl<'a> From<value::ViaParm<'a>> for Via<'a> {
+        fn from(via: value::ViaParm<'a>) -> Via<'a> {
+            Via {
+                protocol: via.protocol,
+                version: via.version,
+                transport: via.transport,
+                host: via.host,
+                port: via.port,
+                params_text: via.params.as_str(),
+                params: via.params.iter().map(|p| (p.name, p.value)).collect(),
+                text: via.text,
+            }
+        }
+    }
+
+    impl Via<'_> {
+        pub(crate) fn check_borrowed(&self, input: &str) {
+            let input = input.as_bytes();
+            for part in
+                [self.protocol, self.version, self.transport, self.host]
+            {
+                borrowed_range(input, part);
+            }
+            borrowed_range(input, self.text);
+            borrowed_range(input, self.params_text);
+            if let Some(port) = self.port {
+                borrowed_range(input, port);
+            }
+            for (name, value) in &self.params {
+                borrowed_range(self.params_text.as_bytes(), name);
+                if let Some(value) = value {
+                    borrowed_range(self.params_text.as_bytes(), value);
+                }
+            }
+        }
+    }
+
+    /// `sent-protocol LWS sent-by *( SEMI via-params )` at `i`.
+    fn via_parm(src: &str, i: usize) -> Result<(Via<'_>, usize), ErrorKind> {
+        let s = src.as_bytes();
+        let invalid = ErrorKind::Via;
+        let token = |at: usize| -> Result<(&str, usize), ErrorKind> {
+            let end = skip(s, at, is_token);
+            if end == at {
+                return Err(invalid);
+            }
+            Ok((&src[at..end], end))
+        };
+        let slash = |at: usize| -> Result<usize, ErrorKind> {
+            let at = skip(s, at, is_ws);
+            if s.get(at) != Some(&b'/') {
+                return Err(invalid);
+            }
+            Ok(skip(s, at + 1, is_ws))
+        };
+
+        let start = skip(s, i, is_ws);
+        let (protocol, at) = token(start)?;
+        let (version, at) = token(slash(at)?)?;
+        let (transport, at) = token(slash(at)?)?;
+
+        let host_start = skip(s, at, is_ws);
+        if host_start == at {
+            return Err(invalid);
+        }
+        let host_end = if s.get(host_start) == Some(&b'[') {
+            let close = skip(s, host_start + 1, |b| {
+                b.is_ascii_hexdigit() || b == b':' || b == b'.'
+            });
+            if close == host_start + 1 || s.get(close) != Some(&b']') {
+                return Err(invalid);
+            }
+            close + 1
+        } else {
+            skip(s, host_start, |b| {
+                b.is_ascii_alphanumeric() || b"-.".contains(&b)
+            })
+        };
+        if host_end == host_start {
+            return Err(invalid);
+        }
+
+        let colon = skip(s, host_end, is_ws);
+        let (port, end) = if s.get(colon) == Some(&b':') {
+            let port_start = skip(s, colon + 1, is_ws);
+            let port_end = skip(s, port_start, |b| b.is_ascii_digit());
+            if port_end == port_start {
+                return Err(invalid);
+            }
+            (Some(&src[port_start..port_end]), port_end)
+        } else {
+            (None, host_end)
+        };
+
+        let (params, params_text, rest) = params_of(&src[end..], true)?;
+        let end = src.len() - rest.len();
+        let via = Via {
+            protocol,
+            version,
+            transport,
+            host: &src[host_start..host_end],
+            port,
+            params_text,
+            params,
+            text: &src[start..end],
+        };
+        Ok((via, end))
+    }
+
+    pub(crate) fn via_parms(
+        src: &str,
+    ) -> Vec<(Result<Via<'_>, ErrorKind>, &str)> {
+        list(src, via_parm, ErrorKind::Via)
     }
 }
 
@@ -946,6 +1126,10 @@ mod tests {
             b"a84b4c76e66710@pc33.atlanta.example.com",
             b"<{a}>:\\\"/[b]?@(c)",
             b"a@b@c",
+            b"SIP/2.0/UDP pc33.atlanta.example.com:5060;branch=z9hG4bK776asdhds",
+            b"SIP/2.0/UDP h;received=2001:db8::9;rport, SIP / 2.0 / TCP [::1]:5061",
+            b"SIP/2.0/UDP h;x=a/b",
+            b"SIP/2.0/UDPh",
             b"\xff",
         ] {
             value(seed);

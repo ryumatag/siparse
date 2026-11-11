@@ -48,6 +48,41 @@ pub(super) fn value(c: &mut Criterion) {
         });
     });
 
+    // The top Via a transaction key needs, alone and with what a server and
+    // proxies add.
+    let vias = [
+        (
+            "typical",
+            "SIP/2.0/UDP pc33.atlanta.example.com:5060;branch=z9hG4bK776asdhds",
+            1,
+        ),
+        (
+            "full",
+            concat!(
+                "SIP/2.0/UDP [2001:db8::1]:5060;branch=z9hG4bK776asdhds;rport=5060",
+                ";received=2001:db8::9, SIP/2.0/TCP proxy.example.com;branch=z9hG4bKa1",
+            ),
+            2,
+        ),
+    ];
+    for (category, input, count) in vias {
+        benchmark(
+            c,
+            format!("value/via_parms/{category}"),
+            input.len() as u64,
+            |b| {
+                b.iter(|| {
+                    let mut n = 0;
+                    for item in value::via_parms(bb(input)) {
+                        bb(item.unwrap());
+                        n += 1;
+                    }
+                    assert_eq!(n, count);
+                });
+            },
+        );
+    }
+
     // The values that match a response to its transaction and a request to
     // its dialog.
     let cseq = "314159 INVITE";
