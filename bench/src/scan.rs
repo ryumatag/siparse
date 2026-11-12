@@ -20,6 +20,7 @@ pub(super) fn scan(c: &mut Criterion) {
             "\"Bob \\\"B\\\" Smith\" <sip:bob@biloxi.example.com>",
             scan::quoted_string,
         ),
+        ("comment", "(Linux; x86_64) Softphone/2.1", scan::comment),
     ];
 
     for (thing, input, f) in cases {

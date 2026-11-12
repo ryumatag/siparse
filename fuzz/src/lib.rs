@@ -405,6 +405,28 @@ pub fn scan(input: &[u8]) {
         }
     }
 
+    fn comment(src: &str) -> Option<(&str, &str)> {
+        let bytes = src.as_bytes();
+        if bytes.first() != Some(&b'(') {
+            return None;
+        }
+        let mut open = 0;
+        let mut i = 0;
+        loop {
+            match *bytes.get(i)? {
+                b'(' => open += 1,
+                b')' if open == 1 => return Some(src.split_at(i + 1)),
+                b')' => open -= 1,
+                b'\\' => match *bytes.get(i + 1)? {
+                    b'\r' | b'\n' | 0x80.. => return None,
+                    _ => i += 1,
+                },
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+
     fn check(
         src: &str,
         actual: Option<(&str, &str)>,
@@ -458,6 +480,7 @@ pub fn scan(input: &[u8]) {
             quoted_string(src),
             "quoted_string",
         );
+        check(src, scan::comment(src), comment(src), "comment");
     }
 }
 

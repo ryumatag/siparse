@@ -2,10 +2,10 @@
 Scans for the elements inside a header value.
 
 The functions here split a header value into the elements that RFC 3261
-section 25.1 builds every header grammar from, such as a `token`, a `host`, or
-a `quoted-string`. [`value`](crate::value) reads whole productions with them,
-such as an address or a Via. Use these directly for a header that `value` has
-no production for, instead of copying the rules.
+section 25.1 builds every header grammar from, such as a `token`, a `host`, a
+`quoted-string` or a `comment`. [`value`](crate::value) reads whole productions
+with them, such as an address or a Via. Use these directly for a header that
+`value` has no production for, instead of copying the rules.
 
 Each function takes the rest of a value and looks at its start. It returns the
 element it finds there, together with what follows it, or `None` when the value
@@ -222,6 +222,75 @@ pub fn quoted_string(src: &str) -> Option<(&str, &str)> {
     }
 }
 
+/// Scans a `comment`, text in parentheses that may hold nested comments.
+///
+/// The comment is returned with its parentheses, the comments nested in it,
+/// and its escapes, as written. A backslash escapes the byte after it, which
+/// must be ASCII other than `CR` or `LF`, as `quoted-pair` allows. Returns
+/// `None` if `src` does not start with `(`, if a parenthesis is left open,
+/// or if an escape is malformed. Server, User-Agent and Retry-After hold
+/// comments.
+///
+/// RFC 3261, Section 25.1:
+///
+/// ```text
+/// comment  =  LPAREN *(ctext / quoted-pair / comment) RPAREN
+/// ctext    =  %x21-27 / %x2A-5B / %x5D-7E / UTF8-NONASCII / LWS
+/// ```
+///
+/// `LPAREN` and `RPAREN` allow whitespace around the parentheses. Inside, it
+/// is `ctext` and part of the comment. Outside, skip it with [`sws`].
+///
+/// # Example
+///
+/// ```
+/// use siparse::scan;
+///
+/// // A User-Agent `product` and the comment after it.
+/// let value = "Softphone/2.1 (Linux; \\(x86_64\\) (build 7))";
+/// let (product, rest) = scan::token(value).unwrap();
+/// let rest = scan::separator(rest, '/').unwrap();
+/// let (version, rest) = scan::token(rest).unwrap();
+/// let (comment, rest) = scan::comment(scan::lws(rest).unwrap()).unwrap();
+///
+/// assert_eq!((product, version), ("Softphone", "2.1"));
+/// assert_eq!(comment, "(Linux; \\(x86_64\\) (build 7))");
+/// assert_eq!(rest, "");
+/// assert_eq!(scan::comment("(open (nested)"), None);
+/// ```
+#[inline]
+pub fn comment(src: &str) -> Option<(&str, &str)> {
+    let bytes = src.as_bytes();
+    if bytes.first() != Some(&b'(') {
+        return None;
+    }
+
+    // Comments are rare and short, so a byte loop serves them. A counter in
+    // place of recursion keeps deep nesting from growing the stack.
+    let mut depth = 0usize;
+    let mut i = 0;
+    while let Some(&b) = bytes.get(i) {
+        match b {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    // The parenthesis is ASCII, so the split is on a
+                    // character boundary.
+                    return Some(src.split_at(i + 1));
+                }
+            }
+            b'\\' => match bytes.get(i + 1)? {
+                b'\r' | b'\n' | 0x80.. => return None,
+                _ => i += 1,
+            },
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Splits `src` after the run of bytes that `scan` consumes, or returns `None`
 /// if the run is empty.
 ///
@@ -252,7 +321,11 @@ fn whitespace_len(src: &[u8]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::{format, string::ToString, vec::Vec};
+    use std::{
+        format,
+        string::{String, ToString},
+        vec::Vec,
+    };
 
     use super::*;
 
@@ -369,6 +442,67 @@ mod tests {
         assert_eq!(quoted_string("\"\\\u{e9}\""), None);
     }
 
+    #[test]
+    fn comments() {
+        assert_eq!(comment("()"), Some(("()", "")));
+        assert_eq!(comment("(a) b"), Some(("(a)", " b")));
+        assert_eq!(comment("(a (b) c);x"), Some(("(a (b) c)", ";x")));
+        assert_eq!(comment("((()))()"), Some(("((()))", "()")));
+        assert_eq!(comment("(a \\) b) c"), Some(("(a \\) b)", " c")));
+        assert_eq!(comment("(a \\( b)"), Some(("(a \\( b)", "")));
+        assert_eq!(comment("(\\\\)x"), Some(("(\\\\)", "x")));
+        assert_eq!(comment("(\\\x01)"), Some(("(\\\x01)", "")));
+        // A quote is plain `ctext` in a comment, so it does not protect the
+        // parenthesis after it.
+        assert_eq!(comment("(\"(\")"), None);
+        assert_eq!(comment("(\"(\"))"), Some(("(\"(\"))", "")));
+        assert_eq!(comment("(a \r\n b)"), Some(("(a \r\n b)", "")));
+        assert_eq!(
+            comment("(\u{7530}\u{4e2d}) rest"),
+            Some(("(\u{7530}\u{4e2d})", " rest"))
+        );
+
+        assert_eq!(comment(""), None);
+        assert_eq!(comment("a(b)"), None);
+        assert_eq!(comment(" (a)"), None);
+        assert_eq!(comment("("), None);
+        assert_eq!(comment("(a (b)"), None);
+        assert_eq!(comment("(a\\"), None);
+        assert_eq!(comment("(a\\)"), None);
+        assert_eq!(comment("(\\\r\n b)"), None);
+        assert_eq!(comment("(\\\u{e9})"), None);
+
+        // Nesting deeper than any recursion could go is still read.
+        let deep = format!("{}{}", "(".repeat(10_000), ")".repeat(10_000));
+        assert_eq!(comment(&deep), Some((deep.as_str(), "")));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "exhaustive input is too slow under Miri")]
+    fn comments_match_the_scalar_reference() {
+        // Every string of up to four bytes from the bytes a comment turns on,
+        // at every character boundary.
+        const ALPHABET: &[char] = &['(', ')', '\\', 'a', '\r', '\u{e9}'];
+        let mut inputs = Vec::from([String::new()]);
+        for _ in 0..4 {
+            let longer: Vec<_> = inputs
+                .iter()
+                .flat_map(|s| ALPHABET.iter().map(move |c| format!("{s}{c}")))
+                .collect();
+            inputs.extend(longer);
+        }
+        inputs.sort();
+        inputs.dedup();
+
+        for input in &inputs {
+            let starts = input.char_indices().map(|(i, _)| i);
+            for start in starts.chain([input.len()]) {
+                let src = &input[start..];
+                assert_eq!(comment(src), reference::comment(src), "{src:?}");
+            }
+        }
+    }
+
     /// Scalar references for the scans, as the fuzz target also uses.
     mod reference {
         pub(super) fn run(
@@ -384,6 +518,28 @@ mod tests {
 
         pub(super) fn is_token(b: u8) -> bool {
             b.is_ascii_alphanumeric() || b"-.!%*_+`'~".contains(&b)
+        }
+
+        pub(super) fn comment(src: &str) -> Option<(&str, &str)> {
+            let bytes = src.as_bytes();
+            if bytes.first() != Some(&b'(') {
+                return None;
+            }
+            let mut open = 0;
+            let mut i = 0;
+            loop {
+                match *bytes.get(i)? {
+                    b'(' => open += 1,
+                    b')' if open == 1 => return Some(src.split_at(i + 1)),
+                    b')' => open -= 1,
+                    b'\\' => match *bytes.get(i + 1)? {
+                        b'\r' | b'\n' | 0x80.. => return None,
+                        _ => i += 1,
+                    },
+                    _ => {}
+                }
+                i += 1;
+            }
         }
 
         pub(super) fn quoted_string(src: &str) -> Option<(&str, &str)> {
