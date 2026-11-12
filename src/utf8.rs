@@ -117,7 +117,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "exhaustive input is too slow under Miri")]
     fn parser_accepts_every_rust_scalar_utf8_encoding() {
         let mut buf = [0; 4];
 
@@ -136,7 +135,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "exhaustive input is too slow under Miri")]
     fn parser_matches_from_utf8_for_exhaustive_two_byte_sequences() {
         for a in u8::MIN..=u8::MAX {
             for b in u8::MIN..=u8::MAX {
@@ -152,7 +150,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "exhaustive input is too slow under Miri")]
     fn parser_matches_from_utf8_for_dense_boundary_sequences_up_to_four_bytes()
     {
         const BOUNDARY_BYTES: &[u8] = &[

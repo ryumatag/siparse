@@ -225,7 +225,6 @@ mod tests {
     /// search at every `scanned`. This covers every way a match or a near
     /// miss can fall across a block boundary or the end of the buffer.
     #[test]
-    #[cfg_attr(miri, ignore = "exhaustive input is too slow under Miri")]
     fn matches_scalar_exhaustively() {
         const ALPHABET: [u8; 3] = *b"\r\na";
         const MAX_LEN: usize = 8;

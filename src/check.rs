@@ -446,7 +446,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "exhaustive input is too slow under Miri")]
     fn const_forms_agree_with_runtime_forms() {
         for (name, runtime, konst) in CHECKS {
             for_each_input(4, |input| {
@@ -490,7 +489,6 @@ mod tests {
     // input for the element. Values that start with whitespace are skipped,
     // because a head counts it as part of the separator.
     #[test]
-    #[cfg_attr(miri, ignore = "exhaustive input is too slow under Miri")]
     fn agrees_with_head_parsing() {
         for (name, runtime, _) in CHECKS {
             for_each_input(3, |input| {
@@ -523,7 +521,6 @@ mod tests {
     // An offset exists exactly when the check fails, and lies within the
     // input or just past it.
     #[test]
-    #[cfg_attr(miri, ignore = "exhaustive input is too slow under Miri")]
     fn error_offsets_agree_with_checks() {
         for (name, check, error_offset) in OFFSETS {
             for_each_input(4, |input| {
@@ -654,7 +651,6 @@ mod tests {
     // These put two bytes from `ALPHABET` at every position of a longer
     // valid input, so they land in a block, at a block edge, and in the tail.
     #[test]
-    #[cfg_attr(miri, ignore = "exhaustive input is too slow under Miri")]
     fn const_forms_agree_on_long_inputs() {
         const BASE: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
 
