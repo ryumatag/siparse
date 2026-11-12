@@ -130,8 +130,17 @@ jobs:
           cargo build --verbose --lib --no-default-features
           --target thumbv7em-none-eabihf
 
+  # Miri runs the tests of the modules whose `unsafe` it can check: the
+  # header buffer and token marks in `parse`, and the cursor moves and block
+  # loads in `scan` and `simd`. Those tests drive the cursor in `iter`, which
+  # has none of its own. The other modules reach `unsafe` only through
+  # these scans, and the only `unsafe` in `check` is `from_utf8_unchecked`,
+  # whose UTF-8 Miri does not check. Their tests took longer than all the
+  # other jobs here and could find nothing these miss. A module that gains
+  # `unsafe` Miri can check joins the filter.
   miri:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -141,7 +150,14 @@ jobs:
           toolchain: nightly
           components: miri
       - name: Run tests under Miri
-        run: cargo miri test --verbose
+        run: >-
+          cargo miri test --verbose --lib -- parse:: scan:: simd::
+      # The runner is x86_64, so the step above checks the SSE2 paths. Miri
+      # interprets other targets too, which reaches the NEON ones.
+      - name: Run the NEON scans under Miri
+        run: >-
+          cargo miri test --verbose --lib --target aarch64-unknown-linux-gnu
+          -- simd::
 
   docs:
     runs-on: ubuntu-latest

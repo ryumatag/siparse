@@ -1,18 +1,25 @@
 name: bench
 
+# A comparison takes minutes on each target, and most changes do not need
+# one. A branch or pull request runs it only when its head commit asks with
+# one of the trailers below. A release tag always runs it, against the
+# release before it.
+#
 # Pull requests compare against their base, and a push to an `rt/` branch
 # against where it left `main`. `ci` only runs on pull requests, so an
-# optimization branch can be measured on every push before it has one. A
-# squash merge lands the same tree on `main`, so a push there is not
-# benchmarked again. A release tag compares against the release before it.
+# optimization branch can be measured on a push before it has one. A squash
+# merge lands the same tree on `main`, so a push there is not benchmarked
+# again.
 #
-# Trailers in the head commit message adjust a branch or pull request run:
+# Any of these trailers in the head commit message requests a run, and
+# each adjusts it:
 #
-#   Bench-Filter: ^parse/header_value/   benchmarks to run instead of FILTER
+#   Bench-Filter: ^parse/header_value/   benchmarks to run, or `default`
 #   Bench-Base: HEAD~1                   base revision, relative to the head
 #   Bench-Targets: aarch64 x86_64        targets to run, or `all`
 #
-# `Bench-Base: HEAD~1` compares one attempt against the previous one.
+# `Bench-Filter: default` runs FILTER, for a request that changes nothing
+# else. `Bench-Base: HEAD~1` compares one attempt against the previous one.
 on:
   pull_request:
     paths:
@@ -34,19 +41,13 @@ on:
 permissions:
   contents: read
 
-# A newer push to the same branch makes an in-flight comparison stale. A
-# push and the pull request for it share the branch name, so only the later
-# of the two runs.
-concurrency:
-  group: bench-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: true
-
 jobs:
-  # Reads the trailers and picks the targets, so the matrix can depend on
-  # them.
+  # Reads the trailers, decides whether to run, and picks the targets, so
+  # the matrix can depend on them.
   plan:
     runs-on: ubuntu-latest
     outputs:
+      run: ${{ steps.plan.outputs.run }}
       targets: ${{ steps.plan.outputs.targets }}
       filter: ${{ steps.plan.outputs.filter }}
       base: ${{ steps.plan.outputs.base }}
@@ -87,6 +88,34 @@ jobs:
             fi
           }
 
+          # A tag always runs. A branch or pull request runs when its head
+          # commit has a `Bench-` trailer. An unknown one is more likely a
+          # typo than a new request, so it fails the run instead of being
+          # ignored.
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            run=true
+          else
+            keys=$(git log -1 --format='%(trailers:only,keyonly)' |
+              grep -i '^bench-' || true)
+            unknown=$(grep -ivxE 'bench-(filter|base|targets)' <<< "$keys" |
+              paste -sd ' ' - || true)
+            if [[ -n "$unknown" ]]; then
+              echo "::error::Unknown trailer: $unknown"
+              exit 1
+            fi
+            if [[ -n "$keys" ]]; then
+              run=true
+            else
+              run=false
+              echo "No Bench- trailer in the head commit. Skipping."
+            fi
+          fi
+
+          filter=$(trailer Bench-Filter)
+          if [[ "$filter" == default ]]; then
+            filter=
+          fi
+
           requested=$(trailer Bench-Targets)
           if [[ -z "$requested" ]]; then
             targets=$(jq -c 'map(select(.default))' <<< "$all")
@@ -105,8 +134,9 @@ jobs:
           fi
 
           {
+            echo "run=$run"
             echo "targets=$targets"
-            echo "filter=$(trailer Bench-Filter)"
+            echo "filter=$filter"
             echo "base=$(trailer Bench-Base)"
           } >> "$GITHUB_OUTPUT"
 
@@ -120,8 +150,18 @@ jobs:
   compare:
     name: compare (${{ matrix.name }})
     needs: plan
+    if: needs.plan.outputs.run == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    # A newer requested run on the same branch makes an in-flight comparison
+    # stale. A push and the pull request for it share the branch name, so
+    # only the later of the two runs. The group is on the job, not the
+    # workflow, so that a push without a trailer leaves a requested run
+    # alone. It names the target, or the targets of one run would cancel
+    # each other.
+    concurrency:
+      group: bench-${{ github.head_ref || github.ref_name }}-${{ matrix.name }}
+      cancel-in-progress: true
     strategy:
       fail-fast: false
       matrix:

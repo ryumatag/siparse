@@ -82,16 +82,15 @@ mod tests {
 
     // Every byte at every offset of every input length up to three 16-byte
     // blocks, so the vector blocks, the SWAR blocks, and the tail all see
-    // each stopping byte. Miri checks the bytes at the edges of each class.
+    // each stopping byte. Which byte stops the scan changes no load or
+    // cursor move, only where the scan stops. So Miri gets one byte that
+    // stops it and one that does not.
     #[test]
     fn header_value_matches_scalar_for_each_byte() {
-        const EDGES: [u8; 9] =
-            [0x00, 0x08, 0x09, 0x0a, 0x1f, 0x20, 0x7e, 0x7f, 0x80];
-
         for len in 0..=LEN {
             for offset in 0..len {
                 for b in u8::MIN..=u8::MAX {
-                    if cfg!(miri) && !EDGES.contains(&b) && b != 0xff {
+                    if cfg!(miri) && !matches!(b, b' ' | 0x7f) {
                         continue;
                     }
                     let mut input = [b'a'; LEN];
@@ -112,9 +111,14 @@ mod tests {
     /// Every string of `CR`, `LF`, and `a` up to 7 bytes long goes at every
     /// offset of a run of `a`, which crosses the 8- and 16-byte blocks and
     /// their 2-byte overlap. The buffer either ends right after the string,
-    /// for the tails, or runs on to 48 bytes. Miri gets strings up to 4 bytes.
+    /// for the tails, or runs on to 48 bytes.
+    ///
+    /// The scans load and move the same way for any string that stops them
+    /// at the same place. So Miri gets no `CR`, a lone `CR`, a partial match
+    /// and a match at each offset, and skips the strings that repeat them.
     fn assert_head_end_matches_reference(scan: fn(&mut Bytes<'_>) -> bool) {
         const ALPHABET: [u8; 3] = *b"\r\na";
+        const MIRI_PATTERNS: [&[u8]; 4] = [b"", b"\r", b"\r\n\r", b"\r\n\r\n"];
         let max_len = if cfg!(miri) { 4 } else { 7 };
 
         for len in 0..=max_len {
@@ -124,6 +128,9 @@ mod tests {
                 for b in &mut pattern[..len] {
                     *b = ALPHABET[rest % ALPHABET.len()];
                     rest /= ALPHABET.len();
+                }
+                if cfg!(miri) && !MIRI_PATTERNS.contains(&&pattern[..len]) {
+                    continue;
                 }
 
                 for offset in 0..=LEN - len {
