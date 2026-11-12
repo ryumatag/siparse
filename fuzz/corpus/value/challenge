@@ -1,0 +1,4 @@
+Digest realm="atlanta.com",
+ domain="sip:boxesbybob.com", qop="auth",
+ nonce="f84f1cec41e6cbe5aea9c8e88d359",
+ opaque="", stale=FALSE, algorithm=MD5

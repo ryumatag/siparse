@@ -550,7 +550,9 @@ pub fn check(input: &[u8]) {
 /// * [`value::address`](siparse::value::address) agrees with a list of one.
 /// * [`value::params`](siparse::value::params) agrees with the reference at
 ///   every character boundary.
-/// * [`value::media_type`](siparse::value::media_type) agrees with the
+/// * [`value::media_type`](siparse::value::media_type),
+///   [`value::challenge`](siparse::value::challenge) and
+///   [`value::credentials`](siparse::value::credentials) agree with the
 ///   reference.
 /// * [`value::tokens`](siparse::value::tokens),
 ///   [`value::media_ranges`](siparse::value::media_ranges) and
@@ -600,6 +602,24 @@ pub fn value(input: &[u8]) {
         tokens.push((item.map_err(|err| err.kind()), token_list.as_str()));
     }
     assert_eq!(tokens, reference::tokens(input), "tokens {input:?}");
+
+    fn auth(a: value::Auth<'_>) -> reference::Auth<'_> {
+        let params = a.params.iter().map(|p| (p.name, p.value)).collect();
+        (a.scheme, params, a.params.as_str())
+    }
+    let challenge = value::challenge(input).map(auth).map_err(|e| e.kind());
+    assert_eq!(challenge, reference::auth(input), "challenge {input:?}");
+    let credentials =
+        value::credentials(input).map(auth).map_err(|e| e.kind());
+    assert_eq!(credentials, challenge, "credentials {input:?}");
+    if let Ok((scheme, params, text)) = &challenge {
+        borrowed_range(input.as_bytes(), scheme);
+        borrowed_range(input.as_bytes(), text);
+        for (name, value) in params {
+            borrowed_range(text.as_bytes(), name);
+            borrowed_range(text.as_bytes(), value);
+        }
+    }
 
     fn media(m: value::MediaType<'_>) -> reference::Media<'_> {
         let params = m.params.iter().map(|p| (p.name, p.value)).collect();
@@ -1073,6 +1093,56 @@ mod reference {
         list(src, token_at, ErrorKind::Tokens)
     }
 
+    /// A scheme, its `auth-param`s and their text.
+    pub(crate) type Auth<'a> = (&'a str, Vec<(&'a str, &'a str)>, &'a str);
+
+    /// `auth-scheme LWS auth-param *(COMMA auth-param)`, with whitespace
+    /// around it.
+    pub(crate) fn auth(src: &str) -> Result<Auth<'_>, ErrorKind> {
+        let s = src.as_bytes();
+        let invalid = ErrorKind::Auth;
+        let scheme_start = skip(s, 0, is_ws);
+        let scheme_end = skip(s, scheme_start, is_token);
+        let first = skip(s, scheme_end, is_ws);
+        if scheme_end == scheme_start || first == scheme_end {
+            return Err(invalid);
+        }
+
+        let mut params = Vec::new();
+        let mut at = first;
+        loop {
+            let name_start = skip(s, at, is_ws);
+            let name_end = skip(s, name_start, is_token);
+            let eq = skip(s, name_end, is_ws);
+            if name_end == name_start || s.get(eq) != Some(&b'=') {
+                return Err(invalid);
+            }
+            let value_start = skip(s, eq + 1, is_ws);
+            let value_end = if s.get(value_start) == Some(&b'"') {
+                quoted_end(s, value_start).ok_or(invalid)?
+            } else {
+                skip(s, value_start, is_token)
+            };
+            if value_end == value_start {
+                return Err(invalid);
+            }
+            params.push((
+                &src[name_start..name_end],
+                &src[value_start..value_end],
+            ));
+
+            let next = skip(s, value_end, is_ws);
+            match s.get(next) {
+                Some(b',') => at = next + 1,
+                None => {
+                    let text = &src[first..value_end];
+                    return Ok((&src[scheme_start..scheme_end], params, text));
+                }
+                Some(_) => return Err(invalid),
+            }
+        }
+    }
+
     /// A media type or range: the kind, the subtype, the parameters and
     /// their text.
     pub(crate) type Media<'a> = (&'a str, &'a str, Vec<Param<'a>>, &'a str);
@@ -1534,6 +1604,8 @@ mod tests {
             b"text/plain; charset=\"utf-8\"",
             b"application/sdp;level=1;q=0.8;ext, text/*;q=0.5, */*;q=0",
             b"*/sdp;q=2",
+            b"Digest realm=\"atlanta.com\", qop=\"auth,auth-int\", stale=FALSE",
+            b"Digest realm=\"a\",",
             b"\xff",
         ] {
             value(seed);

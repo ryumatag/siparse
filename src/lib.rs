@@ -87,6 +87,8 @@ Within [`value`] and [`uri`]:
   Content-Encoding.
 * [`value::media_type`] reads a Content-Type, and [`value::media_ranges`] the
   ranges of an Accept.
+* [`value::challenge`] and [`value::credentials`] read WWW-Authenticate,
+  Authorization and their Proxy- forms.
 * [`value::via_parms`] reads the values of a Via.
 * [`value::cseq`] and [`value::call_id`] read CSeq and Call-ID.
 * [`uri::sip_uri`] splits a SIP or SIPS URI into its user, password, host,

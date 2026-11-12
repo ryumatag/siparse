@@ -6,7 +6,8 @@ or a `quoted-string`. The functions here put them together into the productions
 that several header grammars share, and return each part as written. From, To,
 Contact, Route, Record-Route and Reply-To all hold a `name-addr` or an
 `addr-spec` followed by `generic-param`s, so [`address`] and [`addresses`] read
-any of them. [`media_type`] and [`media_ranges`] read Content-Type and Accept,
+any of them. [`challenge`] and [`credentials`] read the authentication
+headers, [`media_type`] and [`media_ranges`] Content-Type and Accept,
 [`tokens`] the lists of tokens of Require, Supported, Allow and their kin, [`via_parms`] the values of a Via, and [`cseq`] and
 [`call_id`] the two values that, with the tags in From and To, tell which
 request and which dialog a message belongs to.
@@ -1027,6 +1028,207 @@ fn is_qvalue(src: &str) -> bool {
             "1" => decimals.bytes().all(|b| b == b'0'),
             _ => false,
         }
+}
+
+/// A challenge or credentials: an authentication scheme and its parameters.
+///
+/// RFC 3261, Section 25.1:
+///
+/// ```text
+/// challenge        =  ("Digest" LWS digest-cln *(COMMA digest-cln))
+///                     / other-challenge
+/// other-challenge  =  auth-scheme LWS auth-param *(COMMA auth-param)
+/// credentials      =  ("Digest" LWS digest-response) / other-response
+/// other-response   =  auth-scheme LWS auth-param *(COMMA auth-param)
+/// auth-param       =  auth-param-name EQUAL ( token / quoted-string )
+/// ```
+///
+/// Every `digest-cln` and `dig-resp`, such as `realm`, `nonce`, `qop` or
+/// `response`, is also an `auth-param`, and so is each parameter RFC 7616
+/// and RFC 8760 add. So both a challenge and credentials are a scheme and a
+/// list of `auth-param`s, whatever the scheme.
+///
+/// Like [`Params`], two values are equal when they are written the same.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Auth<'a> {
+    /// The scheme as written, such as `Digest`. RFC 3261 compares it
+    /// case-insensitively.
+    pub scheme: &'a str,
+    /// The parameters.
+    pub params: AuthParams<'a>,
+}
+
+/// The `auth-param`s of a challenge or credentials, separated by `,`.
+///
+/// Iterating yields each [`AuthParam`] in order, repeats included.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct AuthParams<'a> {
+    src: &'a str,
+}
+
+impl<'a> AuthParams<'a> {
+    /// Returns the parameters as written, from the first name to the end of
+    /// the last value.
+    #[inline]
+    pub fn as_str(&self) -> &'a str {
+        self.src
+    }
+
+    /// Returns an iterator over the parameters, in order.
+    #[inline]
+    pub fn iter(&self) -> AuthParamsIter<'a> {
+        AuthParamsIter { rest: self.src }
+    }
+}
+
+impl<'a> IntoIterator for AuthParams<'a> {
+    type Item = AuthParam<'a>;
+    type IntoIter = AuthParamsIter<'a>;
+
+    #[inline]
+    fn into_iter(self) -> AuthParamsIter<'a> {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &AuthParams<'a> {
+    type Item = AuthParam<'a>;
+    type IntoIter = AuthParamsIter<'a>;
+
+    #[inline]
+    fn into_iter(self) -> AuthParamsIter<'a> {
+        self.iter()
+    }
+}
+
+/// One `auth-param`.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct AuthParam<'a> {
+    /// The name as written. RFC 3261 compares it case-insensitively.
+    pub name: &'a str,
+    /// The value as written, a token or a quoted string with its quotes and
+    /// escapes.
+    pub value: &'a str,
+}
+
+/// An iterator over [`AuthParams`].
+#[derive(Clone, Debug)]
+pub struct AuthParamsIter<'a> {
+    rest: &'a str,
+}
+
+impl<'a> Iterator for AuthParamsIter<'a> {
+    type Item = AuthParam<'a>;
+
+    #[inline]
+    fn next(&mut self) -> Option<AuthParam<'a>> {
+        // The parameters were checked, so a `,` and whitespace sit between
+        // two of them and nowhere else outside a quoted string.
+        let rest = scan::sws(self.rest);
+        let rest = rest.strip_prefix(',').unwrap_or(rest);
+        let (param, rest) = auth_param(rest)?;
+        self.rest = rest;
+        Some(param)
+    }
+}
+
+impl FusedIterator for AuthParamsIter<'_> {}
+
+/// Reads a challenge, the value of WWW-Authenticate or Proxy-Authenticate.
+///
+/// # Errors
+///
+/// Returns an [`ErrorKind::Auth`](crate::ErrorKind::Auth) error if `src` is
+/// not a scheme, whitespace and one or more `auth-param`s separated by `,`,
+/// with only whitespace around it.
+///
+/// # Example
+///
+/// ```
+/// use siparse::value;
+///
+/// let challenge = value::challenge(
+///     "Digest realm=\"atlanta.com\", qop=\"auth,auth-int\", nonce=\"84a4cc6f3082\", algorithm=MD5",
+/// )?;
+/// assert_eq!(challenge.scheme, "Digest");
+///
+/// let params: Vec<_> = challenge.params.iter().map(|p| (p.name, p.value)).collect();
+/// assert_eq!(params, [
+///     ("realm", "\"atlanta.com\""),
+///     ("qop", "\"auth,auth-int\""),
+///     ("nonce", "\"84a4cc6f3082\""),
+///     ("algorithm", "MD5"),
+/// ]);
+/// # Ok::<(), siparse::Error>(())
+/// ```
+#[inline]
+pub fn challenge(src: &str) -> Result<Auth<'_>, Error> {
+    auth(src)
+}
+
+/// Reads credentials, the value of Authorization or Proxy-Authorization.
+///
+/// Credentials have the shape of a challenge. See [`challenge`].
+///
+/// # Errors
+///
+/// Returns an [`ErrorKind::Auth`](crate::ErrorKind::Auth) error if `src` is
+/// not a scheme, whitespace and one or more `auth-param`s separated by `,`,
+/// with only whitespace around it.
+///
+/// # Example
+///
+/// ```
+/// use siparse::value;
+///
+/// let credentials = value::credentials(
+///     "Digest username=\"bob\", realm=\"biloxi.com\", uri=\"sip:bob@biloxi.com\", qop=auth, nc=00000001",
+/// )?;
+/// let nc = credentials.params.iter().find(|p| p.name.eq_ignore_ascii_case("nc"));
+/// assert_eq!(nc.map(|p| p.value), Some("00000001"));
+///
+/// assert!(value::credentials("Digest").is_err());
+/// # Ok::<(), siparse::Error>(())
+/// ```
+#[inline]
+pub fn credentials(src: &str) -> Result<Auth<'_>, Error> {
+    auth(src)
+}
+
+/// Reads `auth-scheme LWS auth-param *(COMMA auth-param)`, the shape of
+/// both a challenge and credentials.
+fn auth(src: &str) -> Result<Auth<'_>, Error> {
+    let invalid = Error::auth();
+
+    let (scheme, rest) = scan::token(scan::sws(src)).ok_or(invalid)?;
+    let params = scan::lws(rest).ok_or(invalid)?;
+
+    let (_, mut rest) = auth_param(params).ok_or(invalid)?;
+    loop {
+        // COMMA is `SWS "," SWS`. A list has no empty elements in RFC 3261,
+        // unlike HTTP's, so a `,` always starts another parameter.
+        let after = scan::sws(rest);
+        match after.strip_prefix(',') {
+            Some(next) => rest = auth_param(next).ok_or(invalid)?.1,
+            None if after.is_empty() => break,
+            None => return Err(invalid),
+        }
+    }
+
+    let params = AuthParams { src: &params[..params.len() - rest.len()] };
+    Ok(Auth { scheme, params })
+}
+
+/// Reads an `auth-param`, after any whitespace, from the start of `src`.
+#[inline]
+fn auth_param(src: &str) -> Option<(AuthParam<'_>, &str)> {
+    let (name, rest) = scan::token(scan::sws(src))?;
+    let value = scan::separator(rest, '=')?;
+    let (value, rest) = match value.as_bytes().first()? {
+        b'"' => scan::quoted_string(value)?,
+        _ => scan::token(value)?,
+    };
+    Some((AuthParam { name, value }, rest))
 }
 
 /// A `via-parm`, one value of a Via header.
@@ -2054,6 +2256,115 @@ mod tests {
             assert_eq!(
                 first.map_err(|err| err.kind()),
                 Err(ErrorKind::MediaType),
+                "{src:?}"
+            );
+        }
+    }
+
+    /// A scheme and its parameters as name and value pairs.
+    type AuthParts<'a> = (&'a str, Vec<(&'a str, &'a str)>);
+
+    fn auth_parts(src: &str) -> Result<AuthParts<'_>, ErrorKind> {
+        challenge(src)
+            .map(|a| {
+                (
+                    a.scheme,
+                    a.params.iter().map(|p| (p.name, p.value)).collect(),
+                )
+            })
+            .map_err(|err| err.kind())
+    }
+
+    #[test]
+    fn challenges_from_the_rfcs() {
+        // The WWW-Authenticate example of RFC 3261 section 20.44, folded.
+        let src = "Digest realm=\"atlanta.com\",\r\n domain=\"sip:boxesbybob.com\", qop=\"auth\",\r\n nonce=\"f84f1cec41e6cbe5aea9c8e88d359\",\r\n opaque=\"\", stale=FALSE, algorithm=MD5";
+        assert_eq!(
+            auth_parts(src),
+            Ok((
+                "Digest",
+                vec![
+                    ("realm", "\"atlanta.com\""),
+                    ("domain", "\"sip:boxesbybob.com\""),
+                    ("qop", "\"auth\""),
+                    ("nonce", "\"f84f1cec41e6cbe5aea9c8e88d359\""),
+                    ("opaque", "\"\""),
+                    ("stale", "FALSE"),
+                    ("algorithm", "MD5"),
+                ]
+            ))
+        );
+
+        // A challenge for the SHA-256 algorithm that RFC 8760 adds.
+        let src = "Digest algorithm=SHA-256, realm=\"atlanta.example.com\", qop=\"auth\", nonce=\"7900f98e-3d2d-4d9c-a3cb-0c5f7f7b2f0f\", opaque=\"\"";
+        let found = challenge(src).unwrap();
+        assert_eq!(
+            found.params.iter().next(),
+            Some(AuthParam { name: "algorithm", value: "SHA-256" })
+        );
+        assert_eq!(found.params.iter().count(), 5);
+        assert_eq!(found.params.as_str(), &src["Digest ".len()..]);
+        for param in found.params {
+            assert_borrowed(src, param.name);
+            assert_borrowed(src, param.value);
+        }
+    }
+
+    #[test]
+    fn credentials_from_the_rfcs() {
+        // The Authorization example of RFC 3261 section 20.7.
+        let alice = "Digest username=\"Alice\", realm=\"atlanta.com\",\r\n nonce=\"84a4cc6f3082121f32b42a2187831a9e\",\r\n response=\"7587245234b3434cc3412213e5f113a5432\"";
+        assert_eq!(credentials(alice).map(|a| a.params.iter().count()), Ok(4));
+
+        // Digest credentials with a `qop`, a nonce count and a client nonce.
+        let src = "Digest username=\"bob\",\r\n realm=\"biloxi.com\",\r\n nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\",\r\n uri=\"sip:bob@biloxi.com\",\r\n qop=auth,\r\n nc=00000001,\r\n cnonce=\"0a4f113b\",\r\n response=\"6629fae49393a05397450978507c4ef1\",\r\n opaque=\"5ccc069c403ebaf9f0171e9517f40e41\"";
+        let found = credentials(src).unwrap();
+        assert_eq!(found.scheme, "Digest");
+        let names: Vec<_> = found.params.iter().map(|p| p.name).collect();
+        assert_eq!(
+            names,
+            [
+                "username", "realm", "nonce", "uri", "qop", "nc", "cnonce",
+                "response", "opaque"
+            ]
+        );
+        assert_eq!(
+            (&found.params).into_iter().nth(5).map(|p| p.value),
+            Some("00000001")
+        );
+
+        // A scheme other than Digest has the same shape.
+        assert_eq!(
+            credentials("NewAuth  token=abc , realm = \"a,b\" ")
+                .map(|a| (a.scheme, a.params.as_str())),
+            Ok(("NewAuth", "token=abc , realm = \"a,b\""))
+        );
+    }
+
+    #[test]
+    fn malformed_challenges() {
+        for src in [
+            "",
+            "Digest",
+            "Digest ",
+            "Digestrealm=\"a\"",
+            "Digest realm",
+            "Digest realm=",
+            "Digest realm=\"open",
+            "Digest realm=\"a\",",
+            "Digest ,realm=\"a\"",
+            "Digest realm=\"a\",,nonce=\"b\"",
+            "Digest realm=\"a\" nonce=\"b\"",
+            "Digest realm=\"a\";nonce=\"b\"",
+            "Digest realm=a/b",
+            "Digest realm=[::1]",
+            "\"Digest\" realm=\"a\"",
+            "Digest realm=\"a\" junk",
+        ] {
+            assert_eq!(auth_parts(src), Err(ErrorKind::Auth), "{src:?}");
+            assert_eq!(
+                credentials(src).map_err(|err| err.kind()),
+                Err(ErrorKind::Auth),
                 "{src:?}"
             );
         }

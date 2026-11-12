@@ -81,6 +81,11 @@ pub enum ErrorKind {
     /// A `;` is not followed by a `generic-param`, which is a `token`
     /// optionally followed by `=` and a `token`, `host` or `quoted-string`.
     GenericParam,
+    /// A value is not a challenge or credentials, where
+    /// [`value::challenge`](crate::value::challenge) or
+    /// [`value::credentials`](crate::value::credentials) reads one: a scheme,
+    /// whitespace, and one or more `auth-param`s separated by `,`.
+    Auth,
     /// A value is not a media type, where
     /// [`value::media_type`](crate::value::media_type) reads one, or not a
     /// list of media ranges, where
@@ -213,6 +218,12 @@ impl Error {
         Error { kind: ErrorKind::GenericParam }
     }
 
+    /// Returns an error indicating an invalid challenge or credentials.
+    #[inline]
+    pub(crate) const fn auth() -> Error {
+        Error { kind: ErrorKind::Auth }
+    }
+
     /// Returns an error indicating an invalid media type or media range.
     #[inline]
     pub(crate) const fn media_type() -> Error {
@@ -272,6 +283,7 @@ impl ErrorKind {
             ErrorKind::BareLf => "LF not preceded by CR",
             ErrorKind::Address => "invalid SIP name-addr or addr-spec",
             ErrorKind::GenericParam => "invalid SIP generic-param",
+            ErrorKind::Auth => "invalid SIP challenge or credentials",
             ErrorKind::MediaType => "invalid SIP media type",
             ErrorKind::Tokens => "invalid SIP token list",
             ErrorKind::Via => "invalid SIP via-parm",

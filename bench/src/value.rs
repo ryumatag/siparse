@@ -105,6 +105,34 @@ pub(super) fn value(c: &mut Criterion) {
         });
     });
 
+    // A Digest challenge and the credentials that answer it.
+    let auth = [
+        (
+            "challenge",
+            "Digest realm=\"atlanta.example.com\", qop=\"auth\", \
+             nonce=\"f84f1cec41e6cbe5aea9c8e88d359\", opaque=\"\", algorithm=MD5",
+            value::challenge as fn(&str) -> Result<value::Auth<'_>, siparse::Error>,
+            5,
+        ),
+        (
+            "credentials",
+            "Digest username=\"bob\", realm=\"atlanta.example.com\", \
+             nonce=\"f84f1cec41e6cbe5aea9c8e88d359\", uri=\"sip:bob@biloxi.example.com\", \
+             qop=auth, nc=00000001, cnonce=\"0a4f113b\", \
+             response=\"6629fae49393a05397450978507c4ef1\"",
+            value::credentials,
+            8,
+        ),
+    ];
+    for (thing, input, read, count) in auth {
+        benchmark(c, format!("value/{thing}"), input.len() as u64, |b| {
+            b.iter(|| {
+                let found = bb(read(bb(input))).unwrap();
+                assert_eq!(found.params.iter().count(), count);
+            });
+        });
+    }
+
     // The option tags a UA lists in Supported.
     let tags = "100rel, timer, replaces, norefersub";
     benchmark(c, "value/tokens", tags.len() as u64, |b| {
