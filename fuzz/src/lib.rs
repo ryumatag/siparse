@@ -550,8 +550,9 @@ pub fn check(input: &[u8]) {
 /// * [`value::address`](siparse::value::address) agrees with a list of one.
 /// * [`value::params`](siparse::value::params) agrees with the reference at
 ///   every character boundary.
-/// * [`value::via_parms`](siparse::value::via_parms) agrees with the
-///   reference, and both list iterators leave the same rest after each item.
+/// * [`value::tokens`](siparse::value::tokens) and
+///   [`value::via_parms`](siparse::value::via_parms) agree with the
+///   reference, and every list iterator leaves the same rest after each item.
 /// * [`value::cseq`](siparse::value::cseq) and
 ///   [`value::call_id`](siparse::value::call_id) agree with the reference.
 /// * Every part is borrowed from the input.
@@ -585,6 +586,17 @@ pub fn value(input: &[u8]) {
         }
     }
     let list: Vec<_> = list.into_iter().map(|(item, _)| item).collect();
+
+    let mut tokens = Vec::new();
+    let mut token_list = value::tokens(input);
+    while let Some(item) = token_list.next() {
+        borrowed_range(input.as_bytes(), token_list.as_str());
+        if let Ok(token) = item {
+            borrowed_range(input.as_bytes(), token);
+        }
+        tokens.push((item.map_err(|err| err.kind()), token_list.as_str()));
+    }
+    assert_eq!(tokens, reference::tokens(input), "tokens {input:?}");
 
     let mut vias = Vec::new();
     let mut parms = value::via_parms(input);
@@ -980,6 +992,21 @@ mod reference {
         src: &str,
     ) -> Vec<(Result<Address<'_>, ErrorKind>, &str)> {
         list(src, address, ErrorKind::Address)
+    }
+
+    /// A `token` after optional whitespace at `i`.
+    fn token_at(src: &str, i: usize) -> Result<(&str, usize), ErrorKind> {
+        let s = src.as_bytes();
+        let start = skip(s, i, is_ws);
+        let end = skip(s, start, is_token);
+        if end == start {
+            return Err(ErrorKind::Tokens);
+        }
+        Ok((&src[start..end], end))
+    }
+
+    pub(crate) fn tokens(src: &str) -> Vec<(Result<&str, ErrorKind>, &str)> {
+        list(src, token_at, ErrorKind::Tokens)
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1387,6 +1414,8 @@ mod tests {
             b"SIP/2.0/UDP h;received=2001:db8::9;rport, SIP / 2.0 / TCP [::1]:5061",
             b"SIP/2.0/UDP h;x=a/b",
             b"SIP/2.0/UDPh",
+            b"100rel, timer,\r\n replaces",
+            b"gzip,,identity",
             b"\xff",
         ] {
             value(seed);

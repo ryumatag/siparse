@@ -160,14 +160,20 @@ consumer.
 # Reading header values
 
 The [`value`] module parses the productions that several header grammars share
-from those elements. [`value::address`] reads a From or To value, and
-[`value::addresses`] a Contact, Route or Record-Route list, into the display
-name, the URI and the header parameters. [`value::params`] reads the
-`generic-param`s that end many other headers. [`value::via_parms`] reads the
-values of a Via, and [`value::cseq`] and [`value::call_id`] read CSeq and
-Call-ID. Each part is a `&str` as written,
-and RFC 3261 is followed strictly. Unquoting, decoding, and deciding which
-production a header takes are left to the consumer.
+from those elements:
+
+* [`value::address`] reads a From or To value, and [`value::addresses`] a
+  Contact, Route or Record-Route list, into the display name, the URI and the
+  header parameters.
+* [`value::params`] reads the `generic-param`s that end many other headers.
+* [`value::tokens`] reads the token lists of Require, Supported, Allow and
+  Content-Encoding.
+* [`value::via_parms`] reads the values of a Via.
+* [`value::cseq`] and [`value::call_id`] read CSeq and Call-ID.
+
+Each part is a `&str` as written, and RFC 3261 is followed strictly. Unquoting,
+decoding, and deciding which production a header takes are left to the
+consumer.
 
 # Reading SIP URIs
 

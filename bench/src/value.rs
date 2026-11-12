@@ -83,6 +83,19 @@ pub(super) fn value(c: &mut Criterion) {
         );
     }
 
+    // The option tags a UA lists in Supported.
+    let tags = "100rel, timer, replaces, norefersub";
+    benchmark(c, "value/tokens", tags.len() as u64, |b| {
+        b.iter(|| {
+            let mut n = 0;
+            for item in value::tokens(bb(tags)) {
+                bb(item.unwrap());
+                n += 1;
+            }
+            assert_eq!(n, 4);
+        });
+    });
+
     // The values that match a response to its transaction and a request to
     // its dialog.
     let cseq = "314159 INVITE";

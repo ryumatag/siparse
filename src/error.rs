@@ -81,6 +81,9 @@ pub enum ErrorKind {
     /// A `;` is not followed by a `generic-param`, which is a `token`
     /// optionally followed by `=` and a `token`, `host` or `quoted-string`.
     GenericParam,
+    /// A value is not a comma-separated list of tokens, where
+    /// [`value::tokens`](crate::value::tokens) reads one.
+    Tokens,
     /// A Via value is not a list of `via-parm`s, where
     /// [`value::via_parms`](crate::value::via_parms) reads one.
     ///
@@ -202,6 +205,12 @@ impl Error {
         Error { kind: ErrorKind::GenericParam }
     }
 
+    /// Returns an error indicating an invalid list of tokens.
+    #[inline]
+    pub(crate) const fn tokens() -> Error {
+        Error { kind: ErrorKind::Tokens }
+    }
+
     /// Returns an error indicating an invalid `via-parm`.
     #[inline]
     pub(crate) const fn via() -> Error {
@@ -249,6 +258,7 @@ impl ErrorKind {
             ErrorKind::BareLf => "LF not preceded by CR",
             ErrorKind::Address => "invalid SIP name-addr or addr-spec",
             ErrorKind::GenericParam => "invalid SIP generic-param",
+            ErrorKind::Tokens => "invalid SIP token list",
             ErrorKind::Via => "invalid SIP via-parm",
             ErrorKind::CSeq => "invalid SIP CSeq",
             ErrorKind::CallId => "invalid SIP Call-ID",

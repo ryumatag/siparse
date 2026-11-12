@@ -6,7 +6,8 @@ or a `quoted-string`. The functions here put them together into the productions
 that several header grammars share, and return each part as written. From, To,
 Contact, Route, Record-Route and Reply-To all hold a `name-addr` or an
 `addr-spec` followed by `generic-param`s, so [`address`] and [`addresses`] read
-any of them. [`via_parms`] reads the values of a Via, and [`cseq`] and
+any of them. [`tokens`] reads the lists of tokens of Require, Supported, Allow
+and their kin, [`via_parms`] the values of a Via, and [`cseq`] and
 [`call_id`] the two values that, with the tags in From and To, tell which
 request and which dialog a message belongs to.
 
@@ -405,8 +406,8 @@ impl<'a> Iterator for Addresses<'a> {
 
 impl FusedIterator for Addresses<'_> {}
 
-/// The state of a comma-separated list, shared by [`Addresses`] and
-/// [`ViaParms`].
+/// The state of a comma-separated list, shared by [`Addresses`], [`Tokens`]
+/// and [`ViaParms`].
 #[derive(Clone, Debug)]
 struct List<'a> {
     /// What is left of the value. It is an empty slice at the end of the
@@ -732,6 +733,87 @@ pub fn call_id(src: &str) -> Result<&str, Error> {
 
     Ok(&src[..src.len() - rest.len()])
 }
+
+/// Iterates over a header value that is a comma-separated list of tokens.
+///
+/// That is the shape of Require, Proxy-Require, Unsupported, Supported,
+/// Allow and Content-Encoding, whose elements are all a `token`.
+///
+/// RFC 3261, Section 25.1:
+///
+/// ```text
+/// Require           =  "Require" HCOLON option-tag *(COMMA option-tag)
+/// Supported         =  ( "Supported" / "k" ) HCOLON
+///                      [option-tag *(COMMA option-tag)]
+/// Allow             =  "Allow" HCOLON [Method *(COMMA Method)]
+/// Content-Encoding  =  ( "Content-Encoding" / "e" ) HCOLON
+///                      content-coding *(COMMA content-coding)
+/// option-tag        =  token
+/// content-coding    =  token
+/// ```
+///
+/// As with [`addresses`], each item is a token as written or the error that
+/// ends the list, and a list has at least one token. Supported and Allow may
+/// also be empty, so check for that before calling this. Tokens compare
+/// case-sensitively or not depending on the header, which is left to the
+/// caller.
+///
+/// # Errors
+///
+/// An item is an [`ErrorKind::Tokens`](crate::ErrorKind::Tokens) error
+/// where the list does not go on with a token, as after a trailing `,`.
+///
+/// # Example
+///
+/// ```
+/// use siparse::value;
+///
+/// let mut tags = value::tokens("100rel,\r\n timer");
+/// assert_eq!(tags.next(), Some(Ok("100rel")));
+/// assert_eq!(tags.as_str(), "\r\n timer");
+/// assert_eq!(tags.next(), Some(Ok("timer")));
+/// assert_eq!(tags.next(), None);
+///
+/// assert!(value::tokens("100rel timer").next().unwrap().is_err());
+/// ```
+#[inline]
+pub fn tokens(src: &str) -> Tokens<'_> {
+    Tokens { list: List::new(src) }
+}
+
+/// An iterator over the tokens of a header value.
+///
+/// See [`tokens`].
+#[derive(Clone, Debug)]
+pub struct Tokens<'a> {
+    list: List<'a>,
+}
+
+impl<'a> Tokens<'a> {
+    /// Returns what is left of the value after the tokens read so far.
+    ///
+    /// After a token that a `,` follows, this is the rest of the value past
+    /// the `,`, as written, whitespace included. Once the list has ended, by
+    /// its last token or by an error, it is empty.
+    #[inline]
+    pub fn as_str(&self) -> &'a str {
+        self.list.rest
+    }
+}
+
+impl<'a> Iterator for Tokens<'a> {
+    type Item = Result<&'a str, Error>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Result<&'a str, Error>> {
+        self.list.next(
+            |src| scan::token(scan::sws(src)).ok_or(Error::tokens()),
+            Error::tokens(),
+        )
+    }
+}
+
+impl FusedIterator for Tokens<'_> {}
 
 /// A `via-parm`, one value of a Via header.
 ///
@@ -1600,6 +1682,60 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn token_list(src: &str) -> Result<Vec<&str>, ErrorKind> {
+        tokens(src).collect::<Result<_, _>>().map_err(|err| err.kind())
+    }
+
+    #[test]
+    fn token_lists() {
+        for (src, expected) in [
+            ("100rel", &["100rel"][..]),
+            ("100rel,timer", &["100rel", "timer"]),
+            (
+                " 100rel ,\r\n timer\t, replaces ",
+                &["100rel", "timer", "replaces"],
+            ),
+            ("gzip, identity", &["gzip", "identity"]),
+            ("INVITE,ACK,X-VENDOR", &["INVITE", "ACK", "X-VENDOR"]),
+        ] {
+            assert_eq!(token_list(src).as_deref(), Ok(expected), "{src:?}");
+            for token in tokens(src).flatten() {
+                assert_borrowed(src, token);
+            }
+        }
+
+        for src in [
+            "", " ", ",", ",a", "a,", "a,,b", "a , ,b", "a b", "a;b", "a/b",
+            "a=b", "\"a\"", "\u{e9}", "a\u{e9}",
+        ] {
+            assert_eq!(token_list(src), Err(ErrorKind::Tokens), "{src:?}");
+        }
+    }
+
+    #[test]
+    fn token_lists_show_what_is_left() {
+        let src = "a, b ,c";
+        let mut list = tokens(src);
+        assert_eq!(list.as_str(), src);
+        assert_eq!(list.next(), Some(Ok("a")));
+        assert_eq!(list.as_str(), " b ,c");
+        assert_eq!(list.next(), Some(Ok("b")));
+        assert_eq!(list.as_str(), "c");
+        assert_eq!(list.next(), Some(Ok("c")));
+        assert_eq!(list.as_str(), "");
+        assert_borrowed(src, list.as_str());
+        assert_eq!(list.next(), None);
+
+        let mut list = tokens("a, b c");
+        assert_eq!(list.next(), Some(Ok("a")));
+        assert_eq!(
+            list.next().map(|item| item.map_err(|err| err.kind())),
+            Some(Err(ErrorKind::Tokens))
+        );
+        assert_eq!(list.as_str(), "");
+        assert_eq!(list.next(), None);
     }
 
     #[test]
