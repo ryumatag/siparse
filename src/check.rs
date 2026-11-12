@@ -1,10 +1,13 @@
 /*!
-Checks for single SIP grammar elements.
+Checks single elements before they are written into a head.
 
 Each function checks that the whole input is one element, such as a header
 value, and returns it as a `&str` borrowed from the input. A crate that
 builds SIP messages from parts can use these to accept exactly what the
-parser accepts in a head, without copying the grammar.
+parser accepts in a head, without copying the grammar. The checks cover what
+a head allows, not the grammar of a particular header or URI. To read a
+received value by its grammar, use [`value`](crate::value) or
+[`uri`](crate::uri).
 
 Unlike in a head, nothing follows the element. A delimiter that would end
 it in a head, such as the `SP` after a method or a `CRLF` that does not

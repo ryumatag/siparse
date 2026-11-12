@@ -1,11 +1,11 @@
 /*!
 Scans for the elements inside a header value.
 
-[`check`](crate::check) validates a whole header value. The functions here
-split such a value into the elements that RFC 3261 section 25.1 builds every
-header grammar from, such as a `token`, a `host`, or a `quoted-string`. A crate
-that reads typed headers, or a transport that needs the `branch` of a `Via`,
-uses them instead of copying those rules.
+The functions here split a header value into the elements that RFC 3261
+section 25.1 builds every header grammar from, such as a `token`, a `host`, or
+a `quoted-string`. [`value`](crate::value) reads whole productions with them,
+such as an address or a Via. Use these directly for a header that `value` has
+no production for, instead of copying the rules.
 
 Each function takes the rest of a value and looks at its start. It returns the
 element it finds there, together with what follows it, or `None` when the value
