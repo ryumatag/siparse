@@ -50,6 +50,49 @@ The start-line fields are `Option`s so that a partial head can show how far
 the parser got. Once the head is complete, `complete()` on the start-line,
 such as [`RequestLine::complete`], returns the same fields without them.
 
+# Modules
+
+Which part of the crate to use depends on what is at hand:
+
+| At hand | Use |
+|---|---|
+| Bytes received on a socket | [`RequestHead`], [`ResponseHead`] or [`AnyHead`], at the root |
+| A stream of messages, such as TCP | [`frame`], to find where each head ends and to spot keepalives |
+| A header value to read | [`value`], which reads the productions header grammars share |
+| A header with no production in `value` | [`scan`], the lexical elements to read it with |
+| A URI to read | [`uri`] |
+| A value about to be written into a head | [`check`] |
+
+The modules that read go from coarse to fine. The head parsers return each
+header value raw. [`value`] splits one by its RFC 3261 production, such as a
+`name-addr` with its parameters, and [`uri`] splits a SIP URI. [`scan`] returns
+the single elements that header grammars, and `value`, are built from, such as
+a `token` or a `quoted-string`. Each returns its parts as `&str`s borrowed from
+the input, and none decodes them.
+
+[`check`] works the other way. It tells whether a value that an application
+built may go into a head, by the same rules the head parser applies, such as
+the characters a header value or a Request-URI may hold. That is the envelope
+of a head, not the grammar of a particular header, so `check::request_uri`
+accepts URIs that [`uri::sip_uri`] rejects. Each check also has a `const fn`
+form for constants.
+
+Within [`value`] and [`uri`]:
+
+* [`value::address`] reads a From or To value, and [`value::addresses`] a
+  Contact, Route or Record-Route list, into the display name, the URI and the
+  header parameters.
+* [`value::params`] reads the `generic-param`s that end many other headers.
+* [`value::tokens`] reads the token lists of Require, Supported, Allow and
+  Content-Encoding.
+* [`value::via_parms`] reads the values of a Via.
+* [`value::cseq`] and [`value::call_id`] read CSeq and Call-ID.
+* [`uri::sip_uri`] splits a SIP or SIPS URI into its user, password, host,
+  port, parameters and headers.
+
+They follow RFC 3261 strictly. Unquoting, decoding, defaults, and deciding
+which production a header takes are left to the consumer.
+
 # Partial input
 
 [`Status::Partial`] is not an error. It means the buffer ends before the head
@@ -140,49 +183,6 @@ transport and buffer-type dependencies.
 [`bytes`]: https://docs.rs/bytes
 [`BytesMut`]: https://docs.rs/bytes/latest/bytes/struct.BytesMut.html
 [RFC 5626]: https://www.rfc-editor.org/rfc/rfc5626
-
-# Checking single elements
-
-The [`check`] module checks one element at a time, such as a header value that
-an application built, against the same rules the parser applies in a head. A
-crate that builds SIP messages can use it instead of copying the grammar. Each
-check also has a `const fn` form for checking constants at compile time.
-
-# Scanning inside a value
-
-The [`scan`] module splits a header value into the elements that RFC 3261
-section 25.1 builds every header grammar from, such as a `token`, a `host`, or
-a `quoted-string`. A crate that reads typed headers, or a transport that needs
-the `branch` of a `Via`, uses it instead of copying those rules. Each scan
-takes the rest of a value and returns the element at its start as a `&str`,
-together with what follows it. What an element means is still left to the
-consumer.
-
-# Reading header values
-
-The [`value`] module parses the productions that several header grammars share
-from those elements:
-
-* [`value::address`] reads a From or To value, and [`value::addresses`] a
-  Contact, Route or Record-Route list, into the display name, the URI and the
-  header parameters.
-* [`value::params`] reads the `generic-param`s that end many other headers.
-* [`value::tokens`] reads the token lists of Require, Supported, Allow and
-  Content-Encoding.
-* [`value::via_parms`] reads the values of a Via.
-* [`value::cseq`] and [`value::call_id`] read CSeq and Call-ID.
-
-Each part is a `&str` as written, and RFC 3261 is followed strictly. Unquoting,
-decoding, and deciding which production a header takes are left to the
-consumer.
-
-# Reading SIP URIs
-
-The [`uri`] module splits a SIP or SIPS URI, such as a Request-URI or the URI
-of an address, into its user, password, host, port, parameters and headers.
-[`uri::sip_uri`] checks each part, escapes and IP literals included, and
-returns it as written. Decoding escapes and choosing defaults are left to the
-consumer.
 
 # Parsing policy
 
@@ -406,8 +406,8 @@ pub mod bench {
         parse::parse_header_name(bytes)
     }
 
-    /// [`find_head_end`](crate::frame::find_head_end) with SWAR only, the fallback
-    /// on other targets.
+    /// [`find_head_end`](crate::frame::find_head_end) with SWAR only, the
+    /// fallback on other targets.
     #[doc(hidden)]
     #[inline]
     pub fn find_head_end_swar(buf: &[u8], scanned: usize) -> Option<usize> {
