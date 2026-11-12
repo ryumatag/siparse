@@ -10,7 +10,7 @@ type Find = fn(&[u8], usize) -> Option<usize>;
 
 /// The crate's search, with SIMD where the target has it.
 fn simd(buf: &[u8], scanned: usize) -> Option<usize> {
-    siparse::find_head_end(buf, scanned)
+    siparse::frame::find_head_end(buf, scanned)
 }
 
 /// The crate's search with SWAR only, the fallback on other targets.

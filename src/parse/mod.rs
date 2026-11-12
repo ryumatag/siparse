@@ -2,30 +2,25 @@
 SIP head parser.
 */
 
-mod head_end;
 mod header;
-mod keepalive;
 mod start_line;
 
 use crate::{error::Error, iter::Bytes};
 
+pub(crate) use self::{
+    header::{header_name, header_value},
+    start_line::{method, reason_phrase, request_uri},
+};
 pub use self::{
-    head_end::find_head_end,
     header::{Header, HeaderBuf, Headers, ValueLines},
-    keepalive::{parse_ping, parse_pong},
     start_line::{
         CompleteRequestLine, CompleteStartLine, CompleteStatusLine,
         RequestLine, StartLine, StatusLine,
     },
 };
-pub(crate) use self::{
-    header::{header_name, header_value},
-    start_line::{method, reason_phrase, request_uri},
-};
 // Productions that `crate::bench` measures one at a time.
 #[cfg(feature = "__bench")]
 pub(crate) use self::{
-    head_end::find_head_end_with,
     header::{parse_header_name, parse_header_value},
     start_line::{parse_status_code, parse_version},
 };

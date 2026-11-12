@@ -10,7 +10,7 @@ a split ping, so it has to wait. A client is waiting for a pong, so it must
 not wait for bytes that may never come.
 */
 
-use crate::parse::Status;
+use crate::Status;
 
 /// The RFC 5626 keepalive ping that a client sends.
 const PING: &[u8] = b"\r\n\r\n";
@@ -46,7 +46,7 @@ const PONG: &[u8] = b"\r\n";
 /// # Example
 ///
 /// ```
-/// use siparse::{parse_ping, Status};
+/// use siparse::{frame::parse_ping, Status};
 ///
 /// let buf = b"\r\n\r\nOPTIONS sip:carol@example.com SIP/2.0\r\n";
 ///
@@ -82,7 +82,7 @@ pub fn parse_ping(buf: &[u8]) -> Status<Option<usize>> {
 /// # Example
 ///
 /// ```
-/// use siparse::{parse_pong, Status};
+/// use siparse::{frame::parse_pong, Status};
 ///
 /// assert_eq!(parse_pong(b"\r\n"), Status::Complete(Some(2)));
 /// assert_eq!(parse_pong(b"SIP/2.0 200 OK\r\n"), Status::Complete(None));

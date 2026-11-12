@@ -43,7 +43,7 @@ const HEAD_END: &[u8] = b"\r\n\r\n";
 /// brings the end.
 ///
 /// ```
-/// use siparse::{find_head_end, HeaderBuf, RequestHead, Status};
+/// use siparse::{frame::find_head_end, HeaderBuf, RequestHead, Status};
 ///
 /// let message = b"OPTIONS sip:carol@example.com SIP/2.0\r\n\
 ///                 Call-ID: a84b4c76e66710@pc33.example.com\r\n\

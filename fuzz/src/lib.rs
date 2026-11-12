@@ -13,9 +13,9 @@ cargo +nightly fuzz run response_head \
     -max_total_time=30 -max_len=4096
 ```
 
-The `find_head_end` target compares [`siparse::find_head_end`] against a
-one-window-at-a-time search at every `scanned`, and checks that it finds
-the end the parser returns:
+The `find_head_end` target compares [`siparse::frame::find_head_end`]
+against a one-window-at-a-time search at every `scanned`, and checks that
+it finds the end the parser returns:
 
 ```text
 mkdir -p tmp/fuzz-find-head-end
@@ -309,13 +309,13 @@ pub fn find_head_end(input: &[u8]) {
 
     for scanned in 0..=input.len() {
         assert_eq!(
-            siparse::find_head_end(input, scanned),
+            siparse::frame::find_head_end(input, scanned),
             scalar(scanned),
             "scanned={scanned}"
         );
     }
 
-    let found = siparse::find_head_end(input, 0);
+    let found = siparse::frame::find_head_end(input, 0);
     let in_leading_crlfs =
         |end: usize| input[..end].chunks(2).all(|pair| pair == b"\r\n");
     match parse_request::<16>(input).result {

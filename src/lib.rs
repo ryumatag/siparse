@@ -65,9 +65,10 @@ the buffer grows between parses, create them again for each parse.
 
 Because every retry starts over, a head that arrives in many small reads costs
 time quadratic in its length. On stream transports, limit the head size. A
-framer can also skip most retries with [`find_head_end`]. After a `Partial`,
-it scans only the newly read bytes, plus the last three bytes of the previous
-read, for the empty line `\r\n\r\n`, and parses again only once that appears.
+framer can also skip most retries with [`frame::find_head_end`]. After a
+`Partial`, it scans only the newly read bytes, plus the last three bytes of the
+previous read, for the empty line `\r\n\r\n`, and parses again only once that
+appears.
 
 # Keepalives
 
@@ -78,10 +79,10 @@ front of a message is skipped silently.
 
 On a connection-oriented transport that implements RFC 5626, check for a
 keepalive at each message boundary before parsing a head. A server calls
-[`parse_ping`] and answers each ping with a single `CRLF`. A client calls
-[`parse_pong`] to notice the reply. The two checks are separate because they
-treat a buffer that ends in `CRLF` differently. A server may have half of a
-split ping, while a client must not wait for more bytes.
+[`frame::parse_ping`] and answers each ping with a single `CRLF`. A client
+calls [`frame::parse_pong`] to notice the reply. The two checks are separate
+because they treat a buffer that ends in `CRLF` differently. A server may have
+half of a split ping, while a client must not wait for more bytes.
 
 [RFC 3261 section 7.5]: https://www.rfc-editor.org/rfc/rfc3261#section-7.5
 
@@ -238,7 +239,7 @@ validation pass.
 # SIMD
 
 Two scans use SIMD where the target has it. The header value scan covers most
-of the bytes in a head, and [`find_head_end`] covers every byte of it:
+of the bytes in a head, and [`frame::find_head_end`] covers every byte of it:
 
 * **x86_64** - SSE2, 16 bytes at a time.
 * **aarch64** (little-endian) - NEON, 16 bytes at a time. Header values start
@@ -255,8 +256,8 @@ same holds without `std`.
 Every path accepts the same input and stops at the same byte as the others.
 Tests compare each one with a scalar reference. SIMD pays off as values get
 longer. Values of a few bytes cost about the same as with SWAR.
-[`find_head_end`] gains on reads of any length, since it skips whole blocks
-until the end of the head and needs no setup.
+[`frame::find_head_end`] gains on reads of any length, since it skips whole
+blocks until the end of the head and needs no setup.
 
 The other scans, for header names, the Request-URI, reason phrases, and the
 [`scan`] module, use SWAR or a lookup table per byte. What they cover is
@@ -298,6 +299,7 @@ mod macros;
 
 pub mod check;
 mod error;
+pub mod frame;
 mod iter;
 mod parse;
 pub mod scan;
@@ -311,12 +313,42 @@ pub mod value;
 pub use self::{
     error::{Error, ErrorKind},
     parse::{
-        find_head_end, parse_ping, parse_pong, AnyHead, CompleteRequestLine,
-        CompleteStartLine, CompleteStatusLine, Header, HeaderBuf, Headers,
-        MessageHead, RequestHead, RequestLine, ResponseHead, StartLine,
-        Status, StatusLine, ValueLines,
+        AnyHead, CompleteRequestLine, CompleteStartLine, CompleteStatusLine,
+        Header, HeaderBuf, Headers, MessageHead, RequestHead, RequestLine,
+        ResponseHead, StartLine, Status, StatusLine, ValueLines,
     },
 };
+
+// The framing functions lived at the root before they moved to `frame`.
+// `#[deprecated]` on a `pub use` has no effect, so the old paths are
+// wrappers. They go away in the next release that breaks compatibility.
+
+/// Finds the end of the first head in `buf`.
+///
+/// This moved to [`frame::find_head_end`].
+#[deprecated(since = "0.4.7", note = "use `siparse::frame::find_head_end`")]
+#[inline]
+pub fn find_head_end(buf: &[u8], scanned: usize) -> Option<usize> {
+    frame::find_head_end(buf, scanned)
+}
+
+/// Checks for an RFC 5626 ping at the start of `buf`.
+///
+/// This moved to [`frame::parse_ping`].
+#[deprecated(since = "0.4.7", note = "use `siparse::frame::parse_ping`")]
+#[inline]
+pub fn parse_ping(buf: &[u8]) -> Status<Option<usize>> {
+    frame::parse_ping(buf)
+}
+
+/// Checks for an RFC 5626 pong at the start of `buf`.
+///
+/// This moved to [`frame::parse_pong`].
+#[deprecated(since = "0.4.7", note = "use `siparse::frame::parse_pong`")]
+#[inline]
+pub fn parse_pong(buf: &[u8]) -> Status<Option<usize>> {
+    frame::parse_pong(buf)
+}
 
 /// Entry points for the `siparse-bench` crate, behind the `__bench` feature.
 ///
@@ -374,12 +406,12 @@ pub mod bench {
         parse::parse_header_name(bytes)
     }
 
-    /// [`find_head_end`](crate::find_head_end) with SWAR only, the fallback
+    /// [`find_head_end`](crate::frame::find_head_end) with SWAR only, the fallback
     /// on other targets.
     #[doc(hidden)]
     #[inline]
     pub fn find_head_end_swar(buf: &[u8], scanned: usize) -> Option<usize> {
-        crate::parse::find_head_end_with(
+        crate::frame::find_head_end_with(
             buf,
             scanned,
             crate::simd::find_head_end_swar,
