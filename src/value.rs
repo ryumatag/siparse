@@ -8,6 +8,8 @@ Contact, Route, Record-Route and Reply-To all hold a `name-addr` or an
 `addr-spec` followed by `generic-param`s, so [`address`] and [`addresses`] read
 any of them. [`challenge`] and [`credentials`] read the authentication
 headers, [`media_type`] and [`media_ranges`] Content-Type and Accept,
+[`token_param`] and [`token_params`] the many headers that are a token with
+parameters,
 [`tokens`] the lists of tokens of Require, Supported, Allow and their kin, [`via_parms`] the values of a Via, and [`cseq`] and
 [`call_id`] the two values that, with the tags in From and To, tell which
 request and which dialog a message belongs to.
@@ -409,7 +411,7 @@ impl<'a> Iterator for Addresses<'a> {
 impl FusedIterator for Addresses<'_> {}
 
 /// The state of a comma-separated list, shared by [`Addresses`],
-/// [`MediaRanges`], [`Tokens`] and [`ViaParms`].
+/// [`MediaRanges`], [`TokenParams`], [`Tokens`] and [`ViaParms`].
 #[derive(Clone, Debug)]
 struct List<'a> {
     /// What is left of the value. It is an empty slice at the end of the
@@ -739,7 +741,8 @@ pub fn call_id(src: &str) -> Result<&str, Error> {
 /// Iterates over a header value that is a comma-separated list of tokens.
 ///
 /// That is the shape of Require, Proxy-Require, Unsupported, Supported,
-/// Allow and Content-Encoding, whose elements are all a `token`.
+/// Allow and Content-Encoding, whose elements are all a `token`, and of
+/// RFC 6665's Allow-Events, whose `event-type` is one too.
 ///
 /// RFC 3261, Section 25.1:
 ///
@@ -1229,6 +1232,145 @@ fn auth_param(src: &str) -> Option<(AuthParam<'_>, &str)> {
         _ => scan::token(value)?,
     };
     Some((AuthParam { name, value }, rest))
+}
+
+/// A token followed by generic parameters.
+///
+/// Many headers are this one shape, as a single value or a comma-separated
+/// list:
+///
+/// | Header | RFC | Production |
+/// |---|---|---|
+/// | Content-Disposition | 3261 | `disp-type *( SEMI disp-param )` |
+/// | Event | 6665 | `event-type *( SEMI event-param )` |
+/// | Subscription-State | 6665 | `substate-value *( SEMI subexp-params )` |
+/// | Session-Expires, Min-SE | 4028 | `delta-seconds *( SEMI se-params )` |
+/// | Reason | 3326 | `reason-value *(COMMA reason-value)` |
+/// | Accept-Encoding | 3261 | `[ encoding *(COMMA encoding) ]` |
+/// | Accept-Language | 3261 | `[ language *(COMMA language) ]` |
+///
+/// Each value, a disposition type, an event type, a number of seconds, a
+/// protocol, a content coding or a language range, is a `token`, and each of
+/// their parameters a `generic-param`.
+///
+/// Like [`Params`], two values are equal when they are written the same.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TokenParam<'a> {
+    /// The token as written.
+    pub token: &'a str,
+    /// The parameters after it.
+    pub params: Params<'a>,
+}
+
+/// Reads a header value that is one token followed by parameters, such as
+/// Content-Disposition, Event or Session-Expires.
+///
+/// What the token and each parameter must hold beyond a `token` and a
+/// `generic-param`, such as the digits of a Session-Expires or the `q` of an
+/// Accept-Encoding, is left to the caller.
+///
+/// # Errors
+///
+/// Returns an [`ErrorKind::TokenParam`](crate::ErrorKind::TokenParam) error
+/// if `src` is not a token followed by parameters, with only whitespace
+/// around it, and an
+/// [`ErrorKind::GenericParam`](crate::ErrorKind::GenericParam) error if a
+/// parameter is malformed.
+///
+/// # Example
+///
+/// ```
+/// use siparse::value;
+///
+/// let disposition = value::token_param("session;handling=required")?;
+/// assert_eq!(disposition.token, "session");
+/// assert_eq!(disposition.params.as_str(), ";handling=required");
+///
+/// let expires = value::token_param("1800;refresher=uas")?;
+/// assert_eq!(expires.token.parse::<u32>(), Ok(1800));
+/// # Ok::<(), siparse::Error>(())
+/// ```
+#[inline]
+pub fn token_param(src: &str) -> Result<TokenParam<'_>, Error> {
+    let (value, rest) = token_param_prefix(src)?;
+    if !scan::sws(rest).is_empty() {
+        return Err(Error::token_param());
+    }
+    Ok(value)
+}
+
+/// Iterates over a header value that is a comma-separated list of tokens
+/// with parameters, such as Reason, Accept-Encoding or Accept-Language.
+///
+/// As with [`addresses`], each item is a value or the error that ends the
+/// list, and a list has at least one value. Accept-Encoding and
+/// Accept-Language may also be empty, so check for that before calling this.
+///
+/// # Errors
+///
+/// An item is an [`ErrorKind::TokenParam`](crate::ErrorKind::TokenParam)
+/// error where the list does not go on with a token, and an
+/// [`ErrorKind::GenericParam`](crate::ErrorKind::GenericParam) error where a
+/// parameter is malformed.
+///
+/// # Example
+///
+/// ```
+/// use siparse::value;
+///
+/// let mut reasons = value::token_params(
+///     "SIP;cause=200;text=\"Call completed elsewhere\", Q.850;cause=16",
+/// );
+/// let sip = reasons.next().unwrap()?;
+/// assert_eq!(sip.token, "SIP");
+/// assert_eq!(sip.params.iter().count(), 2);
+/// assert_eq!(reasons.next().unwrap()?.token, "Q.850");
+/// assert!(reasons.next().is_none());
+/// # Ok::<(), siparse::Error>(())
+/// ```
+#[inline]
+pub fn token_params(src: &str) -> TokenParams<'_> {
+    TokenParams { list: List::new(src) }
+}
+
+/// An iterator over the tokens with parameters of a header value.
+///
+/// See [`token_params`].
+#[derive(Clone, Debug)]
+pub struct TokenParams<'a> {
+    list: List<'a>,
+}
+
+impl<'a> TokenParams<'a> {
+    /// Returns what is left of the value after the items read so far.
+    ///
+    /// After an item that a `,` follows, this is the rest of the value past
+    /// the `,`, as written, whitespace included. Once the list has ended, by
+    /// its last item or by an error, it is empty.
+    #[inline]
+    pub fn as_str(&self) -> &'a str {
+        self.list.rest
+    }
+}
+
+impl<'a> Iterator for TokenParams<'a> {
+    type Item = Result<TokenParam<'a>, Error>;
+
+    fn next(&mut self) -> Option<Result<TokenParam<'a>, Error>> {
+        self.list.next(token_param_prefix, Error::token_param())
+    }
+}
+
+impl FusedIterator for TokenParams<'_> {}
+
+/// Reads a token and its parameters from the start of `src`, returning
+/// what follows them.
+fn token_param_prefix(src: &str) -> Result<(TokenParam<'_>, &str), Error> {
+    let (token, rest) =
+        scan::token(scan::sws(src)).ok_or(Error::token_param())?;
+    let (params, rest) =
+        params_of(rest, generic_param, Error::generic_param())?;
+    Ok((TokenParam { token, params }, rest))
 }
 
 /// A `via-parm`, one value of a Via header.
@@ -2368,6 +2510,101 @@ mod tests {
                 "{src:?}"
             );
         }
+    }
+
+    fn token_param_list(src: &str) -> Result<Vec<(&str, &str)>, ErrorKind> {
+        token_params(src)
+            .map(|item| item.map(|t| (t.token, t.params.as_str())))
+            .collect::<Result<_, _>>()
+            .map_err(|err| err.kind())
+    }
+
+    #[test]
+    fn single_tokens_with_parameters() {
+        for (src, token, params) in [
+            ("session", "session", ""),
+            ("render;handling=optional", "render", ";handling=optional"),
+            (" icon ; x=\"a;b\" ", "icon", "; x=\"a;b\""),
+            ("presence;id=1234", "presence", ";id=1234"),
+            ("active;expires=3600", "active", ";expires=3600"),
+            (
+                "terminated;reason=timeout;retry-after=30",
+                "terminated",
+                ";reason=timeout;retry-after=30",
+            ),
+            ("1800;refresher=uas", "1800", ";refresher=uas"),
+            ("90", "90", ""),
+        ] {
+            let found = token_param(src)
+                .unwrap_or_else(|err| panic!("{src:?}: {err}"));
+            assert_eq!(
+                (found.token, found.params.as_str()),
+                (token, params),
+                "{src:?}"
+            );
+            assert_borrowed(src, found.token);
+            assert_borrowed(src, found.params.as_str());
+        }
+
+        for src in [
+            "",
+            ";handling=optional",
+            "session handling",
+            "a/b",
+            "\"a\"",
+            "a, b",
+        ] {
+            assert_eq!(
+                token_param(src).map_err(|err| err.kind()),
+                Err(ErrorKind::TokenParam),
+                "{src:?}"
+            );
+        }
+        for src in ["session;", "session;handling=", "a;b=\"open"] {
+            assert_eq!(
+                token_param(src).map_err(|err| err.kind()),
+                Err(ErrorKind::GenericParam),
+                "{src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lists_of_tokens_with_parameters() {
+        assert_eq!(
+            token_param_list(
+                "SIP;cause=200;text=\"Call completed, elsewhere\",\r\n Q.850 ;cause=16"
+            ),
+            Ok(vec![
+                ("SIP", ";cause=200;text=\"Call completed, elsewhere\""),
+                ("Q.850", ";cause=16"),
+            ])
+        );
+        assert_eq!(
+            token_param_list("gzip;q=1.0, identity; q=0.5, *;q=0"),
+            Ok(vec![
+                ("gzip", ";q=1.0"),
+                ("identity", "; q=0.5"),
+                ("*", ";q=0")
+            ])
+        );
+        assert_eq!(
+            token_param_list("da, en-gb;q=0.8, en;q=0.7"),
+            Ok(vec![("da", ""), ("en-gb", ";q=0.8"), ("en", ";q=0.7")])
+        );
+
+        for src in ["", ",a", "a,", "a,,b", "a b", "a;q=1 b"] {
+            assert_eq!(
+                token_param_list(src),
+                Err(ErrorKind::TokenParam),
+                "{src:?}"
+            );
+        }
+        assert_eq!(token_param_list("a;q=, b"), Err(ErrorKind::GenericParam));
+
+        let mut list = token_params("SIP;cause=200, Q.850");
+        list.next().unwrap().unwrap();
+        assert_eq!(list.as_str(), " Q.850");
     }
 
     #[test]

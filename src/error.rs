@@ -94,6 +94,13 @@ pub enum ErrorKind {
     /// This covers the parameters too, since an `m-parameter` is narrower
     /// than a `generic-param` and a `q` has to hold a `qvalue`.
     MediaType,
+    /// A value is not a token followed by parameters, where
+    /// [`value::token_param`](crate::value::token_param) reads one, or not a
+    /// list of them, where
+    /// [`value::token_params`](crate::value::token_params) reads one. A
+    /// malformed parameter is a [`GenericParam`](ErrorKind::GenericParam)
+    /// error instead.
+    TokenParam,
     /// A value is not a comma-separated list of tokens, where
     /// [`value::tokens`](crate::value::tokens) reads one.
     Tokens,
@@ -230,6 +237,12 @@ impl Error {
         Error { kind: ErrorKind::MediaType }
     }
 
+    /// Returns an error indicating an invalid token with parameters.
+    #[inline]
+    pub(crate) const fn token_param() -> Error {
+        Error { kind: ErrorKind::TokenParam }
+    }
+
     /// Returns an error indicating an invalid list of tokens.
     #[inline]
     pub(crate) const fn tokens() -> Error {
@@ -285,6 +298,7 @@ impl ErrorKind {
             ErrorKind::GenericParam => "invalid SIP generic-param",
             ErrorKind::Auth => "invalid SIP challenge or credentials",
             ErrorKind::MediaType => "invalid SIP media type",
+            ErrorKind::TokenParam => "invalid SIP token with parameters",
             ErrorKind::Tokens => "invalid SIP token list",
             ErrorKind::Via => "invalid SIP via-parm",
             ErrorKind::CSeq => "invalid SIP CSeq",

@@ -83,8 +83,11 @@ Within [`value`] and [`uri`]:
   Contact, Route or Record-Route list, into the display name, the URI and the
   header parameters.
 * [`value::params`] reads the `generic-param`s that end many other headers.
-* [`value::tokens`] reads the token lists of Require, Supported, Allow and
-  Content-Encoding.
+* [`value::tokens`] reads the token lists of Require, Supported, Allow,
+  Allow-Events and Content-Encoding.
+* [`value::token_param`] and [`value::token_params`] read a token with
+  parameters, such as Content-Disposition, Event, Session-Expires, Reason and
+  Accept-Encoding.
 * [`value::media_type`] reads a Content-Type, and [`value::media_ranges`] the
   ranges of an Accept.
 * [`value::challenge`] and [`value::credentials`] read WWW-Authenticate,

@@ -133,6 +133,29 @@ pub(super) fn value(c: &mut Criterion) {
         });
     }
 
+    // A Content-Disposition, and the Reason a forking proxy puts in its
+    // CANCEL.
+    let disposition = "session;handling=required";
+    benchmark(c, "value/token_param", disposition.len() as u64, |b| {
+        b.iter(|| {
+            let found = bb(value::token_param(bb(disposition))).unwrap();
+            assert_eq!(found.token.len(), 7);
+        });
+    });
+
+    let reason =
+        "SIP;cause=200;text=\"Call completed elsewhere\", Q.850;cause=16";
+    benchmark(c, "value/token_params", reason.len() as u64, |b| {
+        b.iter(|| {
+            let mut n = 0;
+            for item in value::token_params(bb(reason)) {
+                bb(item.unwrap());
+                n += 1;
+            }
+            assert_eq!(n, 2);
+        });
+    });
+
     // The option tags a UA lists in Supported.
     let tags = "100rel, timer, replaces, norefersub";
     benchmark(c, "value/tokens", tags.len() as u64, |b| {

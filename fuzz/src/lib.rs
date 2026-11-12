@@ -550,7 +550,9 @@ pub fn check(input: &[u8]) {
 /// * [`value::address`](siparse::value::address) agrees with a list of one.
 /// * [`value::params`](siparse::value::params) agrees with the reference at
 ///   every character boundary.
-/// * [`value::media_type`](siparse::value::media_type),
+/// * [`value::token_param`](siparse::value::token_param),
+///   [`value::token_params`](siparse::value::token_params),
+///   [`value::media_type`](siparse::value::media_type),
 ///   [`value::challenge`](siparse::value::challenge) and
 ///   [`value::credentials`](siparse::value::credentials) agree with the
 ///   reference.
@@ -602,6 +604,31 @@ pub fn value(input: &[u8]) {
         tokens.push((item.map_err(|err| err.kind()), token_list.as_str()));
     }
     assert_eq!(tokens, reference::tokens(input), "tokens {input:?}");
+
+    fn token_param(t: value::TokenParam<'_>) -> reference::TokenParam<'_> {
+        let params = t.params.iter().map(|p| (p.name, p.value)).collect();
+        (t.token, params, t.params.as_str())
+    }
+    let single =
+        value::token_param(input).map(token_param).map_err(|e| e.kind());
+    assert_eq!(single, reference::token_param(input), "token_param {input:?}");
+
+    let mut items = Vec::new();
+    let mut item_list = value::token_params(input);
+    while let Some(item) = item_list.next() {
+        borrowed_range(input.as_bytes(), item_list.as_str());
+        let item = item.map(token_param).map_err(|err| err.kind());
+        if let Ok((token, _, text)) = &item {
+            borrowed_range(input.as_bytes(), token);
+            borrowed_range(input.as_bytes(), text);
+        }
+        items.push((item, item_list.as_str()));
+    }
+    assert_eq!(
+        items,
+        reference::token_params(input),
+        "token_params {input:?}"
+    );
 
     fn auth(a: value::Auth<'_>) -> reference::Auth<'_> {
         let params = a.params.iter().map(|p| (p.name, p.value)).collect();
@@ -1091,6 +1118,38 @@ mod reference {
 
     pub(crate) fn tokens(src: &str) -> Vec<(Result<&str, ErrorKind>, &str)> {
         list(src, token_at, ErrorKind::Tokens)
+    }
+
+    /// A token, its parameters and their text.
+    pub(crate) type TokenParam<'a> = (&'a str, Vec<Param<'a>>, &'a str);
+
+    /// A `token` and `generic-param`s at `i`.
+    fn token_param_at(
+        src: &str,
+        i: usize,
+    ) -> Result<(TokenParam<'_>, usize), ErrorKind> {
+        let s = src.as_bytes();
+        let start = skip(s, i, is_ws);
+        let end = skip(s, start, is_token);
+        if end == start {
+            return Err(ErrorKind::TokenParam);
+        }
+        let (params, text, rest) = params_of(&src[end..], Grammar::Generic)?;
+        Ok(((&src[start..end], params, text), src.len() - rest.len()))
+    }
+
+    pub(crate) fn token_param(src: &str) -> Result<TokenParam<'_>, ErrorKind> {
+        let (value, end) = token_param_at(src, 0)?;
+        if skip(src.as_bytes(), end, is_ws) != src.len() {
+            return Err(ErrorKind::TokenParam);
+        }
+        Ok(value)
+    }
+
+    pub(crate) fn token_params(
+        src: &str,
+    ) -> Vec<(Result<TokenParam<'_>, ErrorKind>, &str)> {
+        list(src, token_param_at, ErrorKind::TokenParam)
     }
 
     /// A scheme, its `auth-param`s and their text.
@@ -1606,6 +1665,8 @@ mod tests {
             b"*/sdp;q=2",
             b"Digest realm=\"atlanta.com\", qop=\"auth,auth-int\", stale=FALSE",
             b"Digest realm=\"a\",",
+            b"SIP;cause=200;text=\"Call completed, elsewhere\", Q.850;cause=16",
+            b"terminated;reason=timeout;retry-after=30",
             b"\xff",
         ] {
             value(seed);
