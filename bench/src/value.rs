@@ -187,6 +187,15 @@ pub(super) fn value(c: &mut Criterion) {
         });
     });
 
+    // The Replaces of an attended transfer.
+    let replaces = "98732@sip.example.com;from-tag=r33th4x0r;to-tag=ff87ff";
+    benchmark(c, "value/call_id_params", replaces.len() as u64, |b| {
+        b.iter(|| {
+            let found = bb(value::call_id_params(bb(replaces))).unwrap();
+            assert_eq!(found.call_id.len(), 21);
+        });
+    });
+
     // Parameters as they follow a Via's `sent-by`, read and walked.
     let params = ";branch=z9hG4bK776asdhds;rport;received=192.0.2.4;ttl=16";
     benchmark(c, "value/params/typical", params.len() as u64, |b| {

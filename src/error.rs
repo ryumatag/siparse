@@ -115,7 +115,9 @@ pub enum ErrorKind {
     /// [`value::cseq`](crate::value::cseq) reads one.
     CSeq,
     /// A Call-ID value is not `word [ "@" word ]`, where
-    /// [`value::call_id`](crate::value::call_id) reads one.
+    /// [`value::call_id`](crate::value::call_id) reads one, or not that
+    /// followed by parameters, where
+    /// [`value::call_id_params`](crate::value::call_id_params) reads one.
     CallId,
     /// A URI does not start with `sip:` or `sips:`, compared
     /// case-insensitively, where [`uri::sip_uri`](crate::uri::sip_uri) reads

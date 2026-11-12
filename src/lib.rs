@@ -93,7 +93,9 @@ Within [`value`] and [`uri`]:
 * [`value::challenge`] and [`value::credentials`] read WWW-Authenticate,
   Authorization and their Proxy- forms.
 * [`value::via_parms`] reads the values of a Via.
-* [`value::cseq`] and [`value::call_id`] read CSeq and Call-ID.
+* [`value::cseq`] and [`value::call_id`] read CSeq and Call-ID, and
+  [`value::call_id_params`] the Call-ID and tags of Replaces, Join and
+  Target-Dialog.
 * [`uri::sip_uri`] splits a SIP or SIPS URI into its user, password, host,
   port, parameters and headers.
 

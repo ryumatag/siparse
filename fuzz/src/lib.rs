@@ -560,8 +560,10 @@ pub fn check(input: &[u8]) {
 ///   [`value::media_ranges`](siparse::value::media_ranges) and
 ///   [`value::via_parms`](siparse::value::via_parms) agree with the
 ///   reference, and every list iterator leaves the same rest after each item.
-/// * [`value::cseq`](siparse::value::cseq) and
-///   [`value::call_id`](siparse::value::call_id) agree with the reference.
+/// * [`value::cseq`](siparse::value::cseq),
+///   [`value::call_id`](siparse::value::call_id) and
+///   [`value::call_id_params`](siparse::value::call_id_params) agree with
+///   the reference.
 /// * Every part is borrowed from the input.
 pub fn value(input: &[u8]) {
     use siparse::value;
@@ -705,6 +707,22 @@ pub fn value(input: &[u8]) {
     if let Ok((number, method)) = cseq {
         borrowed_range(input.as_bytes(), number);
         borrowed_range(input.as_bytes(), method);
+    }
+
+    let with_params = value::call_id_params(input)
+        .map(|c| {
+            let params = c.params.iter().map(|p| (p.name, p.value)).collect();
+            (c.call_id, params, c.params.as_str())
+        })
+        .map_err(|err| err.kind());
+    assert_eq!(
+        with_params,
+        reference::call_id_params(input),
+        "call_id_params {input:?}"
+    );
+    if let Ok((call_id, _, text)) = &with_params {
+        borrowed_range(input.as_bytes(), call_id);
+        borrowed_range(input.as_bytes(), text);
     }
 
     let call_id = value::call_id(input).map_err(|err| err.kind());
@@ -1034,13 +1052,13 @@ mod reference {
     }
 
     /// `word [ "@" word ]` with whitespace around it.
-    pub(crate) fn call_id(src: &str) -> Result<&str, ErrorKind> {
+    /// The start and end of `word [ "@" word ]` after any whitespace.
+    fn call_id_span(s: &[u8]) -> Result<(usize, usize), ErrorKind> {
         fn is_word(b: u8) -> bool {
             b.is_ascii_alphanumeric()
                 || b"-.!%*_+`'~()<>:\\\"/[]?{}".contains(&b)
         }
 
-        let s = src.as_bytes();
         let start = skip(s, 0, is_ws);
         let mut end = skip(s, start, is_word);
         if end == start {
@@ -1053,10 +1071,31 @@ mod reference {
             }
             end = host_end;
         }
+        Ok((start, end))
+    }
+
+    pub(crate) fn call_id(src: &str) -> Result<&str, ErrorKind> {
+        let s = src.as_bytes();
+        let (start, end) = call_id_span(s)?;
         if skip(s, end, is_ws) != s.len() {
             return Err(ErrorKind::CallId);
         }
         Ok(&src[start..end])
+    }
+
+    /// A `callid`, its parameters and their text.
+    pub(crate) type CallIdParams<'a> = (&'a str, Vec<Param<'a>>, &'a str);
+
+    pub(crate) fn call_id_params(
+        src: &str,
+    ) -> Result<CallIdParams<'_>, ErrorKind> {
+        let s = src.as_bytes();
+        let (start, end) = call_id_span(s)?;
+        let (params, text, rest) = params_of(&src[end..], Grammar::Generic)?;
+        if skip(rest.as_bytes(), 0, is_ws) != rest.len() {
+            return Err(ErrorKind::CallId);
+        }
+        Ok((&src[start..end], params, text))
     }
 
     /// Reads one list element at an index, returning it and its end.
@@ -1667,6 +1706,7 @@ mod tests {
             b"Digest realm=\"a\",",
             b"SIP;cause=200;text=\"Call completed, elsewhere\", Q.850;cause=16",
             b"terminated;reason=timeout;retry-after=30",
+            b"98732@sip.example.com;from-tag=r33th4x0r;to-tag=ff87ff;early-only",
             b"\xff",
         ] {
             value(seed);

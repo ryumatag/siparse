@@ -12,7 +12,9 @@ headers, [`media_type`] and [`media_ranges`] Content-Type and Accept,
 parameters,
 [`tokens`] the lists of tokens of Require, Supported, Allow and their kin, [`via_parms`] the values of a Via, and [`cseq`] and
 [`call_id`] the two values that, with the tags in From and To, tell which
-request and which dialog a message belongs to.
+request and which dialog a message belongs to. [`call_id_params`] reads a
+dialog named by its Call-ID and tags, as Replaces, Join and Target-Dialog
+hold it.
 
 # Example
 
@@ -720,22 +722,91 @@ pub fn cseq(src: &str) -> Result<CSeq<'_>, Error> {
 /// ```
 #[inline]
 pub fn call_id(src: &str) -> Result<&str, Error> {
+    let (call_id, rest) = call_id_prefix(src).ok_or(Error::call_id())?;
+    if !scan::sws(rest).is_empty() {
+        return Err(Error::call_id());
+    }
+    Ok(call_id)
+}
+
+/// A Call-ID followed by parameters, which names a dialog.
+///
+/// RFC 3891, RFC 3911 and RFC 4538:
+///
+/// ```text
+/// Replaces       =  "Replaces" HCOLON callid *(SEMI replaces-param)
+/// Join           =  "Join" HCOLON callid *(SEMI join-param)
+/// Target-Dialog  =  "Target-Dialog" HCOLON callid *(SEMI td-param)
+/// ```
+///
+/// Every `replaces-param`, `join-param` and `td-param`, the tags and
+/// `early-only` included, is a `generic-param`.
+///
+/// Like [`Params`], two values are equal when they are written the same.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct CallIdParams<'a> {
+    /// The `callid` as written, `@` included, as [`call_id`] returns it.
+    pub call_id: &'a str,
+    /// The parameters, such as `to-tag`, `from-tag` or `early-only`.
+    pub params: Params<'a>,
+}
+
+/// Reads a Call-ID followed by parameters, the value of Replaces, Join or
+/// Target-Dialog.
+///
+/// Which parameters each header needs, such as both tags of a Replaces, is
+/// left to the caller. A Replaces that arrives as a header of a Refer-To URI
+/// is percent-escaped there, and is decoded before it is read.
+///
+/// # Errors
+///
+/// Returns an [`ErrorKind::CallId`](crate::ErrorKind::CallId) error if `src`
+/// does not start with a `callid`, or if anything but parameters and
+/// whitespace follows it, and an
+/// [`ErrorKind::GenericParam`](crate::ErrorKind::GenericParam) error if a
+/// parameter is malformed.
+///
+/// # Example
+///
+/// ```
+/// use siparse::value;
+///
+/// let replaces = value::call_id_params(
+///     "98732@sip.example.com;from-tag=r33th4x0r;to-tag=ff87ff;early-only",
+/// )?;
+/// assert_eq!(replaces.call_id, "98732@sip.example.com");
+///
+/// let names: Vec<_> = replaces.params.iter().map(|p| p.name).collect();
+/// assert_eq!(names, ["from-tag", "to-tag", "early-only"]);
+/// # Ok::<(), siparse::Error>(())
+/// ```
+#[inline]
+pub fn call_id_params(src: &str) -> Result<CallIdParams<'_>, Error> {
     let invalid = Error::call_id();
 
-    let src = scan::sws(src);
-    let (_, rest) =
-        split_run(src, simd::match_word_vectored).ok_or(invalid)?;
-    let rest = match rest.strip_prefix('@') {
-        Some(host) => {
-            split_run(host, simd::match_word_vectored).ok_or(invalid)?.1
-        }
-        None => rest,
-    };
+    let (call_id, rest) = call_id_prefix(src).ok_or(invalid)?;
+    let (params, rest) =
+        params_of(rest, generic_param, Error::generic_param())?;
     if !scan::sws(rest).is_empty() {
         return Err(invalid);
     }
 
-    Ok(&src[..src.len() - rest.len()])
+    Ok(CallIdParams { call_id, params })
+}
+
+/// Reads `word [ "@" word ]`, after any whitespace, from the start of `src`.
+///
+/// A `word` holds neither `;` nor whitespace, so the `callid` ends where
+/// parameters or the end of the value begin.
+#[inline]
+fn call_id_prefix(src: &str) -> Option<(&str, &str)> {
+    let src = scan::sws(src);
+    let (_, rest) = split_run(src, simd::match_word_vectored)?;
+    let rest = match rest.strip_prefix('@') {
+        Some(host) => split_run(host, simd::match_word_vectored)?.1,
+        None => rest,
+    };
+    Some((&src[..src.len() - rest.len()], rest))
 }
 
 /// Iterates over a header value that is a comma-separated list of tokens.
@@ -2605,6 +2676,69 @@ mod tests {
         let mut list = token_params("SIP;cause=200, Q.850");
         list.next().unwrap().unwrap();
         assert_eq!(list.as_str(), " Q.850");
+    }
+
+    #[test]
+    fn call_ids_with_parameters() {
+        for (src, call_id, params) in [
+            // Replaces values in the form of RFC 3891's examples.
+            (
+                "98732@sip.example.com;from-tag=r33th4x0r;to-tag=ff87ff",
+                "98732@sip.example.com",
+                vec![param("from-tag", Some("r33th4x0r")), param("to-tag", Some("ff87ff"))],
+            ),
+            (
+                "12adf2f34456gs5;to-tag=12345;from-tag=54321;early-only",
+                "12adf2f34456gs5",
+                vec![
+                    param("to-tag", Some("12345")),
+                    param("from-tag", Some("54321")),
+                    param("early-only", None),
+                ],
+            ),
+            // A Target-Dialog, whose tags RFC 4538 names local and remote.
+            (
+                " fa77as7dad8-sd98ajzz@host.example.com ;\r\n local-tag=kkaz- ;remote-tag=6544 ",
+                "fa77as7dad8-sd98ajzz@host.example.com",
+                vec![param("local-tag", Some("kkaz-")), param("remote-tag", Some("6544"))],
+            ),
+            ("a84b4c76e66710", "a84b4c76e66710", vec![]),
+        ] {
+            let found = call_id_params(src).unwrap_or_else(|err| panic!("{src:?}: {err}"));
+            assert_eq!(found.call_id, call_id, "{src:?}");
+            assert_eq!(found.params.iter().collect::<Vec<_>>(), params, "{src:?}");
+            assert_borrowed(src, found.call_id);
+            assert_borrowed(src, found.params.as_str());
+        }
+
+        for src in [
+            "",
+            ";to-tag=1",
+            "@host;to-tag=1",
+            "a@b@c;to-tag=1",
+            "a b;to-tag=1",
+            "a;to-tag=1 junk",
+            "a,b",
+        ] {
+            assert_eq!(
+                call_id_params(src).map_err(|err| err.kind()),
+                Err(ErrorKind::CallId),
+                "{src:?}"
+            );
+        }
+        for src in ["a;", "a;to-tag=", "a;to-tag=\"open"] {
+            assert_eq!(
+                call_id_params(src).map_err(|err| err.kind()),
+                Err(ErrorKind::GenericParam),
+                "{src:?}"
+            );
+        }
+
+        // A plain Call-ID still takes no parameters.
+        assert_eq!(
+            call_id("a84b4c76e66710;to-tag=1").map_err(|err| err.kind()),
+            Err(ErrorKind::CallId)
+        );
     }
 
     #[test]
