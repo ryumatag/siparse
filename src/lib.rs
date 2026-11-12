@@ -98,6 +98,9 @@ Within [`value`] and [`uri`]:
   Target-Dialog.
 * [`uri::sip_uri`] splits a SIP or SIPS URI into its user, password, host,
   port, parameters and headers.
+* [`uri::tel_uri`] splits a tel URI into its number and parameters, and
+  [`uri::telephone_subscriber`] reads the same in the user of a SIP URI with
+  `user=phone`.
 
 They follow RFC 3261 strictly. Unquoting, decoding, defaults, and deciding
 which production a header takes are left to the consumer.

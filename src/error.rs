@@ -119,9 +119,10 @@ pub enum ErrorKind {
     /// followed by parameters, where
     /// [`value::call_id_params`](crate::value::call_id_params) reads one.
     CallId,
-    /// A URI does not start with `sip:` or `sips:`, compared
-    /// case-insensitively, where [`uri::sip_uri`](crate::uri::sip_uri) reads
-    /// one.
+    /// A URI does not start with the scheme its parser reads, compared
+    /// case-insensitively: `sip:` or `sips:` for
+    /// [`uri::sip_uri`](crate::uri::sip_uri), and `tel:` for
+    /// [`uri::tel_uri`](crate::uri::tel_uri).
     UriScheme,
     /// The `user` of a SIP URI is empty or has a byte outside its set.
     UriUser,
@@ -133,13 +134,18 @@ pub enum ErrorKind {
     /// What follows the `host` of a SIP URI, before its parameters, is not
     /// `:` and one or more digits.
     UriPort,
-    /// A parameter of a SIP URI has an empty or malformed name or value.
+    /// A parameter of a SIP or tel URI has an empty or malformed name or
+    /// value.
     UriParam,
     /// A header of a SIP URI is not a name, `=` and a value, or one of them
     /// has a byte outside its set.
     UriHeader,
-    /// A `%` in a SIP URI is not followed by two hexadecimal digits.
+    /// A `%` in a SIP or tel URI is not followed by two hexadecimal digits.
     UriEscape,
+    /// The number of a tel URI or `telephone-subscriber` is neither a global
+    /// number, `+` and digits, nor a local one, or a local number has no
+    /// `phone-context` that names a domain or a global number.
+    TelNumber,
     /// The caller-provided header storage is too small to hold every header
     /// row in the head.
     ///
@@ -305,14 +311,15 @@ impl ErrorKind {
             ErrorKind::Via => "invalid SIP via-parm",
             ErrorKind::CSeq => "invalid SIP CSeq",
             ErrorKind::CallId => "invalid SIP Call-ID",
-            ErrorKind::UriScheme => "expected a SIP or SIPS URI",
+            ErrorKind::UriScheme => "unexpected URI scheme",
             ErrorKind::UriUser => "invalid SIP URI user",
             ErrorKind::UriPassword => "invalid SIP URI password",
             ErrorKind::UriHost => "invalid SIP URI host",
             ErrorKind::UriPort => "invalid SIP URI port",
-            ErrorKind::UriParam => "invalid SIP URI parameter",
+            ErrorKind::UriParam => "invalid URI parameter",
             ErrorKind::UriHeader => "invalid SIP URI header",
-            ErrorKind::UriEscape => "invalid SIP URI percent escape",
+            ErrorKind::UriEscape => "invalid URI percent escape",
+            ErrorKind::TelNumber => "invalid telephone number",
             ErrorKind::TooManyHeaders => {
                 "too many SIP headers for provided header buffer"
             }

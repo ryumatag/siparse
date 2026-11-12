@@ -1443,7 +1443,9 @@ mod reference {
     }
 }
 
-/// Checks [`siparse::uri::sip_uri`] against the parser it replaced.
+/// Checks [`siparse::uri::sip_uri`] against the parser it replaced, and
+/// [`siparse::uri::tel_uri`] and [`siparse::uri::telephone_subscriber`]
+/// against a reference that walks RFC 3966's grammar.
 ///
 /// The reference is the SIP URI parser signa-core had before this one, which
 /// checks IP literals with `std::net`. Both must accept the same input, split
@@ -1482,6 +1484,156 @@ pub fn uri(input: &[u8]) {
         })
         .map_err(|err| err.kind());
     assert_eq!(actual, reference_uri::parse(input), "sip_uri {input:?}");
+
+    fn tel(t: uri::TelephoneSubscriber<'_>) -> reference_tel::Tel<'_> {
+        (t.number, t.params.iter().map(|p| (p.name, p.value)).collect())
+    }
+    let tel_uri = uri::tel_uri(input).map(tel).map_err(|err| err.kind());
+    assert_eq!(tel_uri, reference_tel::tel_uri(input), "tel_uri {input:?}");
+    let subscriber =
+        uri::telephone_subscriber(input).map(tel).map_err(|err| err.kind());
+    assert_eq!(
+        subscriber,
+        reference_tel::subscriber(input),
+        "telephone_subscriber {input:?}"
+    );
+    if let Ok((number, params)) = &subscriber {
+        borrowed_range(input.as_bytes(), number);
+        for (name, value) in params {
+            borrowed_range(input.as_bytes(), name);
+            if let Some(value) = value {
+                borrowed_range(input.as_bytes(), value);
+            }
+        }
+    }
+}
+
+/// RFC 3966's `telephone-subscriber`, read with byte indices for the `uri`
+/// target.
+mod reference_tel {
+    use siparse::ErrorKind;
+
+    /// A number and its parameters.
+    pub(crate) type Tel<'a> = (&'a str, Vec<(&'a str, Option<&'a str>)>);
+
+    fn visual(b: u8) -> bool {
+        b"-.()".contains(&b)
+    }
+
+    fn global_digits(s: &[u8]) -> bool {
+        s.iter().all(|&b| b.is_ascii_digit() || visual(b))
+            && s.iter().any(|b| b.is_ascii_digit())
+    }
+
+    fn local_digits(s: &[u8]) -> bool {
+        let digit = |b: u8| b.is_ascii_hexdigit() || b == b'*' || b == b'#';
+        s.iter().all(|&b| digit(b) || visual(b)) && s.iter().any(|&b| digit(b))
+    }
+
+    fn hostname(src: &str) -> bool {
+        let name = src.strip_suffix('.').unwrap_or(src);
+        let labels: Vec<&str> = name.split('.').collect();
+        let top_ok = labels
+            .last()
+            .and_then(|top| top.bytes().next())
+            .is_some_and(|b| b.is_ascii_alphabetic());
+        top_ok
+            && labels.iter().all(|label| {
+                let b = label.as_bytes();
+                !b.is_empty()
+                    && b[0].is_ascii_alphanumeric()
+                    && b[b.len() - 1].is_ascii_alphanumeric()
+                    && b.iter()
+                        .all(|&c| c.is_ascii_alphanumeric() || c == b'-')
+            })
+    }
+
+    fn unreserved(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b)
+    }
+
+    /// Checks `%`-escapes and the bytes `allowed` takes.
+    fn value(src: &str, allowed: fn(u8) -> bool) -> Result<(), ErrorKind> {
+        if src.is_empty() {
+            return Err(ErrorKind::UriParam);
+        }
+        let b = src.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'%' {
+                let hex =
+                    |at: usize| b.get(at).is_some_and(u8::is_ascii_hexdigit);
+                if !hex(i + 1) || !hex(i + 2) {
+                    return Err(ErrorKind::UriEscape);
+                }
+                i += 3;
+            } else if allowed(b[i]) {
+                i += 1;
+            } else {
+                return Err(ErrorKind::UriParam);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn subscriber(src: &str) -> Result<Tel<'_>, ErrorKind> {
+        let mut parts = src.split(';');
+        let number = parts.next().unwrap_or("");
+        let nb = number.as_bytes();
+        let ok = match nb.first() {
+            Some(b'+') => global_digits(&nb[1..]),
+            _ => local_digits(nb),
+        };
+        if !ok {
+            return Err(ErrorKind::TelNumber);
+        }
+
+        let mut params = Vec::new();
+        let mut context = false;
+        for pair in parts {
+            let (name, val) = match pair.find('=') {
+                Some(at) => (&pair[..at], Some(&pair[at + 1..])),
+                None => (pair, None),
+            };
+            if name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            {
+                return Err(ErrorKind::UriParam);
+            }
+            if let Some(val) = val {
+                if name.eq_ignore_ascii_case("isub") {
+                    value(val, |b| {
+                        unreserved(b) || b"/?:@&=+$,".contains(&b)
+                    })?;
+                } else {
+                    value(val, |b| unreserved(b) || b"[]/:&+$".contains(&b))?;
+                }
+                if name.eq_ignore_ascii_case("phone-context") {
+                    let vb = val.as_bytes();
+                    context |= match vb.first() {
+                        Some(b'+') => global_digits(&vb[1..]),
+                        _ => hostname(val),
+                    };
+                }
+            }
+            params.push((name, val));
+        }
+        if nb.first() != Some(&b'+') && !context {
+            return Err(ErrorKind::TelNumber);
+        }
+        Ok((number, params))
+    }
+
+    pub(crate) fn tel_uri(src: &str) -> Result<Tel<'_>, ErrorKind> {
+        match src.get(..4) {
+            Some(scheme) if scheme.eq_ignore_ascii_case("tel:") => {
+                subscriber(&src[4..])
+            }
+            _ => Err(ErrorKind::UriScheme),
+        }
+    }
 }
 
 /// The SIP URI parser of signa-core before it moved to siparse, rewritten to
@@ -1688,6 +1840,9 @@ mod tests {
             b"sip:example.com;x=a=b",
             b"sip:a%2@example.com",
             b"tel:+1-201-555-0123",
+            b"tel:863-1234;phone-context=+1-914-555",
+            b"tel:7042;isub=a@b;ext=1;phone-context=example.com",
+            b"+1-212-555-1212;ext=99",
             b"\xff",
         ] {
             uri(seed);

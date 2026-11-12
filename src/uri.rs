@@ -1,5 +1,5 @@
 /*!
-Parses SIP and SIPS URIs into their parts.
+Parses SIP, SIPS and tel URIs into their parts.
 
 [`sip_uri`] reads a URI such as a Request-URI, the URI of an
 [`Address`](crate::value::Address), or a Route entry, and returns each part as
@@ -41,7 +41,9 @@ The parts are syntax only:
   for the caller to check. Repeated parameters are all kept, in order.
 * Headers are URI parts, not header fields. A decoded value may hold bytes no
   header value allows.
-* URIs with other schemes, such as `tel`, are rejected rather than parsed.
+* [`sip_uri`] rejects URIs with other schemes. [`tel_uri`] reads a tel URI,
+  and [`telephone_subscriber`] the same number and parameters in the user of a
+  SIP URI with `user=phone`.
 
 [`SipUri`] has no `PartialEq`. RFC 3261 section 19.1.4 compares SIP URIs by
 rules that are not an equivalence relation, so comparing the parts as written
@@ -222,7 +224,190 @@ pub fn sip_uri(src: &str) -> Result<SipUri<'_>, Error> {
     })
 }
 
-/// The parameters of a [`SipUri`], each after a `;`.
+/// A telephone number with its parameters, as a tel URI or the user of a
+/// SIP URI with `user=phone` holds it.
+///
+/// RFC 3966, Section 3:
+///
+/// ```text
+/// telephone-subscriber  =  global-number / local-number
+/// global-number         =  global-number-digits *par
+/// local-number          =  local-number-digits *par context *par
+/// par                   =  parameter / extension / isdn-subaddress
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct TelephoneSubscriber<'a> {
+    /// The number as written, with its visual separators. A global number
+    /// starts with `+`.
+    pub number: &'a str,
+    /// The parameters, such as `ext`, `isub` and `phone-context`.
+    pub params: UriParams<'a>,
+}
+
+impl<'a> TelephoneSubscriber<'a> {
+    /// Returns whether the number is global, starting with `+` and a country
+    /// code. A local number has a `phone-context` instead.
+    #[inline]
+    pub fn is_global(&self) -> bool {
+        self.number.starts_with('+')
+    }
+}
+
+/// Reads a tel URI.
+///
+/// The whole of `src` must be the URI, `tel:` in any case and then a
+/// [`telephone_subscriber`].
+///
+/// # Errors
+///
+/// Returns an [`ErrorKind::UriScheme`] error if `src` does not start with
+/// `tel:`, and otherwise the errors of [`telephone_subscriber`].
+///
+/// # Example
+///
+/// ```
+/// use siparse::uri;
+///
+/// let global = uri::tel_uri("tel:+1-201-555-0123")?;
+/// assert!(global.is_global());
+/// assert_eq!(global.number, "+1-201-555-0123");
+///
+/// let local = uri::tel_uri("tel:7042;phone-context=example.com")?;
+/// let context = local.params.iter().next().unwrap();
+/// assert_eq!((context.name, context.value), ("phone-context", Some("example.com")));
+/// # Ok::<(), siparse::Error>(())
+/// ```
+pub fn tel_uri(src: &str) -> Result<TelephoneSubscriber<'_>, Error> {
+    let bytes = src.as_bytes();
+    if bytes.len() < 4 || !bytes[..4].eq_ignore_ascii_case(b"tel:") {
+        return Err(Error::uri(ErrorKind::UriScheme));
+    }
+    telephone_subscriber(&src[4..])
+}
+
+/// Reads a `telephone-subscriber`, the part of a tel URI after `tel:`.
+///
+/// RFC 3261 section 19.1.6 puts the same grammar in the user of a SIP URI
+/// whose `user` parameter is `phone`. Pass that user here, decoded first if
+/// it holds escapes the SIP URI needed.
+///
+/// The number is checked against its form, a global or a local one, and a
+/// local number needs a `phone-context` whose value is a domain name or a
+/// global number. Each parameter name is letters, digits and `-`, and each
+/// value the characters of RFC 3966's `pvalue`, or, for `isub`, those of a
+/// `uric` up to the next `;`. As in the grammar, `ext`, `isub` and
+/// `phone-context` are also plain parameters, so their own forms only widen
+/// what is accepted. The order RFC 3966 gives the parameters is not checked,
+/// nor are their values beyond that.
+///
+/// # Errors
+///
+/// Returns an [`ErrorKind::TelNumber`] error if the number is malformed or a
+/// local number has no `phone-context`, an [`ErrorKind::UriParam`] error if
+/// a parameter is malformed, and an [`ErrorKind::UriEscape`] error if a `%`
+/// is not followed by two hexadecimal digits.
+///
+/// # Example
+///
+/// ```
+/// use siparse::{uri, ErrorKind};
+///
+/// let user = uri::telephone_subscriber("863-1234;phone-context=+1-914-555")?;
+/// assert!(!user.is_global());
+///
+/// let err = uri::telephone_subscriber("863-1234").unwrap_err();
+/// assert_eq!(err.kind(), ErrorKind::TelNumber);
+/// # Ok::<(), siparse::Error>(())
+/// ```
+pub fn telephone_subscriber(
+    src: &str,
+) -> Result<TelephoneSubscriber<'_>, Error> {
+    let number_end = src.find(';').unwrap_or(src.len());
+    let (number, params) = src.split_at(number_end);
+    let valid = match number.strip_prefix('+') {
+        Some(digits) => is_global_digits(digits),
+        None => is_local_digits(number),
+    };
+    if !valid {
+        return Err(Error::uri(ErrorKind::TelNumber));
+    }
+
+    let mut context = false;
+    if let Some(list) = params.strip_prefix(';') {
+        for pair in list.split(';') {
+            let (name, value) = match pair.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (pair, None),
+            };
+            let named = !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-');
+            if !named {
+                return Err(Error::uri(ErrorKind::UriParam));
+            }
+            let Some(value) = value else { continue };
+            // `isdn-subaddress` takes a `uric`, which `pvalue` narrows.
+            let allowed = if name.eq_ignore_ascii_case("isub") {
+                is_isub
+            } else {
+                is_uri_param
+            };
+            part(value, allowed, false, ErrorKind::UriParam)?;
+            if name.eq_ignore_ascii_case("phone-context") {
+                context |= is_descriptor(value);
+            }
+        }
+    }
+    if !number.starts_with('+') && !context {
+        return Err(Error::uri(ErrorKind::TelNumber));
+    }
+
+    Ok(TelephoneSubscriber { number, params: UriParams { src: params } })
+}
+
+/// Returns whether `src` follows the `+` of a global number:
+/// `*phonedigit DIGIT *phonedigit`.
+fn is_global_digits(src: &str) -> bool {
+    src.bytes().all(is_phonedigit) && src.bytes().any(|b| b.is_ascii_digit())
+}
+
+/// Returns whether `src` is the number of a local one:
+/// `*phonedigit-hex (HEXDIG / "*" / "#") *phonedigit-hex`.
+fn is_local_digits(src: &str) -> bool {
+    let digit = |b: u8| b.is_ascii_hexdigit() || b == b'*' || b == b'#';
+    src.bytes().all(|b| digit(b) || is_visual_separator(b))
+        && src.bytes().any(digit)
+}
+
+/// Returns whether `b` is a `phonedigit`, a digit or a visual separator.
+fn is_phonedigit(b: u8) -> bool {
+    b.is_ascii_digit() || is_visual_separator(b)
+}
+
+/// Returns whether `b` is a `visual-separator`, which a number may hold for
+/// readability.
+fn is_visual_separator(b: u8) -> bool {
+    matches!(b, b'-' | b'.' | b'(' | b')')
+}
+
+/// Returns whether `src` is the `descriptor` of a `phone-context`: a domain
+/// name, or the digits of a global number.
+fn is_descriptor(src: &str) -> bool {
+    match src.strip_prefix('+') {
+        Some(digits) => is_global_digits(digits),
+        None => is_hostname(src),
+    }
+}
+
+/// Returns whether `b` may appear in an `isub` value, other than as part of
+/// an escape: a `uric` other than `;`, which ends the parameter.
+fn is_isub(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"-_.!~*'()/?:@&=+$,".contains(&b)
+}
+
+/// The parameters of a [`SipUri`] or a [`TelephoneSubscriber`], each after a
+/// `;`.
 ///
 /// Iterating yields each [`UriParam`] in order, repeats included.
 #[derive(Clone, Copy, Debug)]
@@ -472,6 +657,12 @@ fn is_host(src: &str) -> bool {
         return true;
     }
 
+    is_hostname(src)
+}
+
+/// Returns whether `src` is a `hostname`, which RFC 3966 calls a
+/// `domainname`.
+fn is_hostname(src: &str) -> bool {
     let name = src.strip_suffix('.').unwrap_or(src);
     let top = name.rsplit('.').next().unwrap_or("");
     if !top.as_bytes().first().map_or(false, u8::is_ascii_alphabetic) {
@@ -584,6 +775,7 @@ mod tests {
         format,
         net::{Ipv4Addr, Ipv6Addr},
         string::String,
+        vec,
         vec::Vec,
     };
 
@@ -872,6 +1064,168 @@ mod tests {
         }
     }
 
+    /// A number, whether it is global, and its parameters.
+    type Tel<'a> = (&'a str, bool, Vec<(&'a str, Option<&'a str>)>);
+
+    fn tel(src: &str) -> Result<Tel<'_>, ErrorKind> {
+        tel_uri(src)
+            .map(|t| {
+                (
+                    t.number,
+                    t.is_global(),
+                    t.params.iter().map(|p| (p.name, p.value)).collect(),
+                )
+            })
+            .map_err(|err| err.kind())
+    }
+
+    #[test]
+    fn tel_uris_from_rfc_3966() {
+        // The examples of RFC 3966 section 6.
+        assert_eq!(
+            tel("tel:+1-201-555-0123"),
+            Ok(("+1-201-555-0123", true, vec![]))
+        );
+        assert_eq!(
+            tel("tel:7042;phone-context=example.com"),
+            Ok(("7042", false, vec![("phone-context", Some("example.com"))]))
+        );
+        assert_eq!(
+            tel("tel:863-1234;phone-context=+1-914-555"),
+            Ok((
+                "863-1234",
+                false,
+                vec![("phone-context", Some("+1-914-555"))]
+            ))
+        );
+    }
+
+    #[test]
+    fn tel_numbers_and_parameters() {
+        for (src, number, params) in [
+            ("TEL:+1(201)555.0123", "+1(201)555.0123", vec![]),
+            (
+                "tel:+1-201-555-0123;ext=1234",
+                "+1-201-555-0123",
+                vec![("ext", Some("1234"))],
+            ),
+            (
+                "tel:+1-201-555-0123;isub=12;x=y",
+                "+1-201-555-0123",
+                vec![("isub", Some("12")), ("x", Some("y"))],
+            ),
+            (
+                "tel:+1-201-555-0123;isub=a@b?c=d,e",
+                "+1-201-555-0123",
+                vec![("isub", Some("a@b?c=d,e"))],
+            ),
+            ("tel:+12015550123;flag", "+12015550123", vec![("flag", None)]),
+            (
+                "tel:+12015550123;x=%2B1",
+                "+12015550123",
+                vec![("x", Some("%2B1"))],
+            ),
+            (
+                "tel:*21#;phone-context=example.com.",
+                "*21#",
+                vec![("phone-context", Some("example.com."))],
+            ),
+            (
+                "tel:AB-12;PHONE-CONTEXT=example.com",
+                "AB-12",
+                vec![("PHONE-CONTEXT", Some("example.com"))],
+            ),
+            (
+                "tel:7042;ext=1;phone-context=example.com",
+                "7042",
+                vec![
+                    ("ext", Some("1")),
+                    ("phone-context", Some("example.com")),
+                ],
+            ),
+            // `ext` and `isub` are also plain parameters, which take any `pvalue`.
+            (
+                "tel:+12015550123;ext=abc;isub",
+                "+12015550123",
+                vec![("ext", Some("abc")), ("isub", None)],
+            ),
+        ] {
+            let found =
+                tel_uri(src).unwrap_or_else(|err| panic!("{src:?}: {err}"));
+            assert_eq!(found.number, number, "{src:?}");
+            assert_eq!(
+                found
+                    .params
+                    .iter()
+                    .map(|p| (p.name, p.value))
+                    .collect::<Vec<_>>(),
+                params,
+                "{src:?}"
+            );
+            assert_borrowed(src, found.number);
+            assert_borrowed(src, found.params.as_str());
+        }
+    }
+
+    #[test]
+    fn malformed_tel_uris() {
+        use ErrorKind as K;
+        for (src, expected) in [
+            ("sip:+12015550123", K::UriScheme),
+            ("tel", K::UriScheme),
+            ("tel:", K::TelNumber),
+            ("tel:+", K::TelNumber),
+            ("tel:+-().", K::TelNumber),
+            ("tel:+1 201", K::TelNumber),
+            ("tel:+1a", K::TelNumber),
+            ("tel:++1", K::TelNumber),
+            ("tel:-.()", K::TelNumber),
+            ("tel:7042", K::TelNumber),
+            ("tel:7042;ext=1", K::TelNumber),
+            ("tel:7042;phone-context=", K::UriParam),
+            ("tel:7042;phone-context=-bad-", K::TelNumber),
+            ("tel:7042;phone-context=+", K::TelNumber),
+            ("tel:7042;phone-context=example.1", K::TelNumber),
+            ("tel:+12015550123;", K::UriParam),
+            ("tel:+12015550123;;x", K::UriParam),
+            ("tel:+12015550123;=x", K::UriParam),
+            ("tel:+12015550123;a_b=1", K::UriParam),
+            ("tel:+12015550123;x=", K::UriParam),
+            ("tel:+12015550123;x=a@b", K::UriParam),
+            ("tel:+12015550123;x=%2", K::UriEscape),
+            ("tel:+12015550123;isub=%zz", K::UriEscape),
+        ] {
+            assert_eq!(tel(src).map(|_| ()), Err(expected), "{src:?}");
+        }
+    }
+
+    #[test]
+    fn subscribers_in_the_user_of_a_sip_uri() {
+        let uri = sip_uri(
+            "sip:+1-212-555-1212;ext=99@gateway.example.com;user=phone",
+        )
+        .unwrap();
+        let user = telephone_subscriber(uri.user.unwrap()).unwrap();
+        assert_eq!(user.number, "+1-212-555-1212");
+        assert_eq!(
+            user.params.iter().next(),
+            Some(UriParam { name: "ext", value: Some("99") })
+        );
+    }
+
+    #[test]
+    fn every_tel_prefix_parses_or_fails_cleanly() {
+        let value =
+            "tel:863-1234;isub=a@b;ext=12;phone-context=+1-914-555;x=%2B";
+        let ends = value.char_indices().map(|(i, _)| i);
+        for end in ends.chain([value.len()]) {
+            let src = &value[..end];
+            let Ok(found) = tel_uri(src) else { continue };
+            assert_borrowed(src, found.number);
+            assert_borrowed(src, found.params.as_str());
+        }
+    }
+
     /// The IP checks agree with `std::net`, which also follows RFC 3986 for
     /// these forms and rejects IPv4 octets with a leading zero.
     #[test]
@@ -897,7 +1251,7 @@ mod tests {
         let mut v6 = Vec::new();
         for n in 1..=9 {
             for piece in pieces {
-                let mut groups = std::vec![String::from("1"); n];
+                let mut groups = vec![String::from("1"); n];
                 groups[n - 1] = String::from(piece);
                 v6.push(groups.join(":"));
                 for at in 0..=n {

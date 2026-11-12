@@ -33,4 +33,23 @@ pub(super) fn sip_uri(c: &mut Criterion) {
             },
         );
     }
+
+    // A global number, and a local one with the context it needs.
+    let tel_cases = [
+        ("global", "tel:+1-201-555-0123;ext=1234"),
+        ("local", "tel:863-1234;phone-context=+1-914-555"),
+    ];
+    for (category, input) in tel_cases {
+        benchmark(
+            c,
+            format!("uri/tel_uri/{category}"),
+            input.len() as u64,
+            |b| {
+                b.iter(|| {
+                    let found = bb(uri::tel_uri(bb(input))).unwrap();
+                    assert_eq!(found.params.iter().count(), 1);
+                });
+            },
+        );
+    }
 }
