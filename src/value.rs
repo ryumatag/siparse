@@ -797,8 +797,10 @@ pub fn call_id_params(src: &str) -> Result<CallIdParams<'_>, Error> {
 /// Reads `word [ "@" word ]`, after any whitespace, from the start of `src`.
 ///
 /// A `word` holds neither `;` nor whitespace, so the `callid` ends where
-/// parameters or the end of the value begin.
-#[inline]
+/// parameters or the end of the value begin. It is always inlined, since
+/// with a second caller LLVM kept it out of line and `value/call_id` got
+/// 13% slower on aarch64.
+#[inline(always)]
 fn call_id_prefix(src: &str) -> Option<(&str, &str)> {
     let src = scan::sws(src);
     let (_, rest) = split_run(src, simd::match_word_vectored)?;
