@@ -169,6 +169,14 @@ Call-ID. Each part is a `&str` as written,
 and RFC 3261 is followed strictly. Unquoting, decoding, and deciding which
 production a header takes are left to the consumer.
 
+# Reading SIP URIs
+
+The [`uri`] module splits a SIP or SIPS URI, such as a Request-URI or the URI
+of an address, into its user, password, host, port, parameters and headers.
+[`uri::sip_uri`] checks each part, escapes and IP literals included, and
+returns it as written. Decoding escapes and choosing defaults are left to the
+consumer.
+
 # Parsing policy
 
 ### Header values
@@ -289,6 +297,7 @@ mod parse;
 pub mod scan;
 mod simd;
 mod token;
+pub mod uri;
 mod utf8;
 pub mod value;
 

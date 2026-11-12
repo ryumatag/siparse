@@ -11,6 +11,7 @@ mod reason;
 mod request;
 mod response;
 mod scan;
+mod sip_uri;
 mod status;
 mod uri;
 mod value;
@@ -42,6 +43,8 @@ criterion::criterion_group! {
         scan::scan,
         // Public parsers for the productions that header values share.
         value::value,
+        // Public parser for SIP and SIPS URIs.
+        sip_uri::sip_uri,
         // Crate internals behind the `__bench` feature. These call one
         // production directly, so the compiler
         // inlines it into the benchmark loop instead of into `parse_head`,

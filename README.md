@@ -13,7 +13,8 @@ A syntactic parser for SIP message heads in Rust.
 <br>
 
 siparse parses SIP request-lines, status-lines, and header rows, and splits
-header values such as From or Route into the parts RFC 3261 names. It is a
+header values such as From or Route, and SIP URIs, into the parts RFC 3261
+names. It is a
 syntactic parser only and does not perform semantic decoding. Header names
 are not normalized, values are never decoded, and message bodies are left to
 the caller.

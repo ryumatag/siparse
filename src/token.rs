@@ -41,6 +41,32 @@ const WORD_MAP: [bool; 256] = byte_map!(
     b'?' | b'{' | b'}'
 );
 
+// The classes of the parts of a SIP URI, each without the `%` that starts an
+// escape, which the URI parser checks on its own.
+const URI_USER_MAP: [bool; 256] = byte_map!(
+    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' |
+    b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')' |
+    b'&' | b'=' | b'+' | b'$' | b',' | b';' | b'?' | b'/'
+);
+
+const URI_PASSWORD_MAP: [bool; 256] = byte_map!(
+    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' |
+    b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')' |
+    b'&' | b'=' | b'+' | b'$' | b','
+);
+
+const URI_PARAM_MAP: [bool; 256] = byte_map!(
+    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' |
+    b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')' |
+    b'[' | b']' | b'/' | b':' | b'&' | b'+' | b'$'
+);
+
+const URI_HEADER_MAP: [bool; 256] = byte_map!(
+    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' |
+    b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')' |
+    b'[' | b']' | b'/' | b'?' | b':' | b'+' | b'$'
+);
+
 const HEADER_VALUE_ASCII_MAP: [bool; 256] = byte_map!(b'\t' | b' '..=b'~');
 
 const REASON_PHRASE_OCTET_MAP: [bool; 256] = byte_map!(
@@ -119,6 +145,62 @@ pub(crate) const fn is_addr_spec_token(b: u8) -> bool {
 #[inline]
 pub(crate) const fn is_word(b: u8) -> bool {
     WORD_MAP[b as usize]
+}
+
+/// Returns whether `b` is valid in the `user` of a SIP URI, other than as
+/// part of an `escaped`.
+///
+/// RFC 3261, Section 25.1:
+///
+/// > ```text
+/// > user             =  1*( unreserved / escaped / user-unreserved )
+/// > user-unreserved  =  "&" / "=" / "+" / "$" / "," / ";" / "?" / "/"
+/// > ```
+#[inline]
+pub(crate) const fn is_uri_user(b: u8) -> bool {
+    URI_USER_MAP[b as usize]
+}
+
+/// Returns whether `b` is valid in the `password` of a SIP URI, other than
+/// as part of an `escaped`.
+///
+/// RFC 3261, Section 25.1:
+///
+/// > ```text
+/// > password  =  *( unreserved / escaped / "&" / "=" / "+" / "$" / "," )
+/// > ```
+#[inline]
+pub(crate) const fn is_uri_password(b: u8) -> bool {
+    URI_PASSWORD_MAP[b as usize]
+}
+
+/// Returns whether `b` is a `paramchar` of a SIP URI parameter, other than
+/// as part of an `escaped`.
+///
+/// RFC 3261, Section 25.1:
+///
+/// > ```text
+/// > paramchar         =  param-unreserved / unreserved / escaped
+/// > param-unreserved  =  "[" / "]" / "/" / ":" / "&" / "+" / "$"
+/// > ```
+#[inline]
+pub(crate) const fn is_uri_param(b: u8) -> bool {
+    URI_PARAM_MAP[b as usize]
+}
+
+/// Returns whether `b` is valid in the `hname` or `hvalue` of a SIP URI
+/// header, other than as part of an `escaped`.
+///
+/// RFC 3261, Section 25.1:
+///
+/// > ```text
+/// > hname           =  1*( hnv-unreserved / unreserved / escaped )
+/// > hvalue          =  *( hnv-unreserved / unreserved / escaped )
+/// > hnv-unreserved  =  "[" / "]" / "/" / "?" / ":" / "+" / "$"
+/// > ```
+#[inline]
+pub(crate) const fn is_uri_header(b: u8) -> bool {
+    URI_HEADER_MAP[b as usize]
 }
 
 /// Returns whether `b` is valid in a SIP header field name.

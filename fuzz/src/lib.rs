@@ -60,6 +60,16 @@ cargo +nightly fuzz run value \
     -max_total_time=30 -max_len=4096
 ```
 
+The `uri` target compares [`siparse::uri::sip_uri`] against the SIP URI
+parser it replaced, which checks IP literals with `std::net`:
+
+```text
+mkdir -p tmp/fuzz-uri
+cargo +nightly fuzz run uri \
+    tmp/fuzz-uri fuzz/corpus/uri -- \
+    -max_total_time=30 -max_len=4096
+```
+
 The harness checks borrowed ranges and initialized rows on every outcome,
 including errors. It compares parsing results across header buffer capacities,
 including zero, exact-fit, and insufficient capacities, using a 16-slot parse
@@ -1100,9 +1110,256 @@ mod reference {
     }
 }
 
+/// Checks [`siparse::uri::sip_uri`] against the parser it replaced.
+///
+/// The reference is the SIP URI parser signa-core had before this one, which
+/// checks IP literals with `std::net`. Both must accept the same input, split
+/// it into the same parts, and reject it with the same kind of error. Every
+/// part must be borrowed from the input.
+pub fn uri(input: &[u8]) {
+    use siparse::uri;
+
+    let Ok(input) = std::str::from_utf8(input) else {
+        return;
+    };
+
+    let actual = uri::sip_uri(input)
+        .map(|uri| {
+            for part in [uri.host, uri.params.as_str(), uri.headers.as_str()] {
+                borrowed_range(input.as_bytes(), part);
+            }
+            for part in
+                [uri.user, uri.password, uri.port].into_iter().flatten()
+            {
+                borrowed_range(input.as_bytes(), part);
+            }
+            reference_uri::Parts {
+                sips: uri.scheme == uri::Scheme::Sips,
+                user: uri.user,
+                password: uri.password,
+                host: uri.host,
+                port: uri.port,
+                params: uri.params.iter().map(|p| (p.name, p.value)).collect(),
+                headers: uri
+                    .headers
+                    .iter()
+                    .map(|h| (h.name, h.value))
+                    .collect(),
+            }
+        })
+        .map_err(|err| err.kind());
+    assert_eq!(actual, reference_uri::parse(input), "sip_uri {input:?}");
+}
+
+/// The SIP URI parser of signa-core before it moved to siparse, rewritten to
+/// return the parts and siparse's error kinds.
+mod reference_uri {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use siparse::ErrorKind;
+
+    type Param<'a> = (&'a str, Option<&'a str>);
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub(crate) struct Parts<'a> {
+        pub(crate) sips: bool,
+        pub(crate) user: Option<&'a str>,
+        pub(crate) password: Option<&'a str>,
+        pub(crate) host: &'a str,
+        pub(crate) port: Option<&'a str>,
+        pub(crate) params: Vec<Param<'a>>,
+        pub(crate) headers: Vec<(&'a str, &'a str)>,
+    }
+
+    fn unreserved(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b)
+    }
+
+    fn component(
+        src: &str,
+        allowed: impl Fn(u8) -> bool,
+        empty: bool,
+        kind: ErrorKind,
+    ) -> Result<(), ErrorKind> {
+        if src.is_empty() && !empty {
+            return Err(kind);
+        }
+        let bytes = src.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'%' {
+                let hex = |at: usize| {
+                    bytes.get(at).is_some_and(|b| b.is_ascii_hexdigit())
+                };
+                if !hex(index + 1) || !hex(index + 2) {
+                    return Err(ErrorKind::UriEscape);
+                }
+                index += 3;
+            } else if allowed(bytes[index]) {
+                index += 1;
+            } else {
+                return Err(kind);
+            }
+        }
+        Ok(())
+    }
+
+    fn host(src: &str) -> bool {
+        if let Some(inner) =
+            src.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+        {
+            return inner.parse::<Ipv6Addr>().is_ok();
+        }
+        if src.parse::<Ipv4Addr>().is_ok() {
+            return true;
+        }
+        let name = src.strip_suffix('.').unwrap_or(src);
+        let top = name.rsplit('.').next().unwrap_or("");
+        if !top.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) {
+            return false;
+        }
+        name.split('.').all(|label| {
+            label.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+    }
+
+    pub(crate) fn parse(src: &str) -> Result<Parts<'_>, ErrorKind> {
+        let sips = if src
+            .get(..4)
+            .is_some_and(|s| s.eq_ignore_ascii_case("sip:"))
+        {
+            false
+        } else if src.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("sips:"))
+        {
+            true
+        } else {
+            return Err(ErrorKind::UriScheme);
+        };
+        let start = if sips { 5 } else { 4 };
+
+        let user_char = |b| unreserved(b) || b"&=+$,;?/".contains(&b);
+        let password_char = |b| unreserved(b) || b"&=+$,".contains(&b);
+        let param_char = |b| unreserved(b) || b"[]/:&+$".contains(&b);
+        let header_char = |b| unreserved(b) || b"[]/?:+$".contains(&b);
+
+        let (user, password, host_start) =
+            if let Some(at) = src[start..].find('@') {
+                let at = start + at;
+                let info = &src[start..at];
+                let (user, password) = match info.find(':') {
+                    Some(colon) => (&info[..colon], Some(&info[colon + 1..])),
+                    None => (info, None),
+                };
+                component(user, user_char, false, ErrorKind::UriUser)?;
+                if let Some(password) = password {
+                    component(
+                        password,
+                        password_char,
+                        true,
+                        ErrorKind::UriPassword,
+                    )?;
+                }
+                (Some(user), password, at + 1)
+            } else {
+                (None, None, start)
+            };
+
+        let port_end = src[host_start..]
+            .find([';', '?'])
+            .map_or(src.len(), |n| host_start + n);
+        let authority = &src[host_start..port_end];
+        let host_len = if authority.starts_with('[') {
+            let close = authority.find(']').ok_or(ErrorKind::UriHost)?;
+            if !host(&authority[..=close]) {
+                return Err(ErrorKind::UriHost);
+            }
+            close + 1
+        } else {
+            let end = authority.find(':').unwrap_or(authority.len());
+            if !host(&authority[..end]) {
+                return Err(ErrorKind::UriHost);
+            }
+            end
+        };
+        let host_end = host_start + host_len;
+        let port = if host_end < port_end {
+            let rest = &src[host_end..port_end];
+            if !rest.starts_with(':')
+                || rest.len() == 1
+                || !rest.as_bytes()[1..].iter().all(u8::is_ascii_digit)
+            {
+                return Err(ErrorKind::UriPort);
+            }
+            Some(&rest[1..])
+        } else {
+            None
+        };
+
+        let params_end =
+            src[port_end..].find('?').map_or(src.len(), |n| port_end + n);
+        let mut params = Vec::new();
+        if params_end > port_end {
+            for pair in src[port_end + 1..params_end].split(';') {
+                let (name, value) = pair
+                    .split_once('=')
+                    .map_or((pair, None), |(n, v)| (n, Some(v)));
+                component(name, param_char, false, ErrorKind::UriParam)?;
+                if let Some(value) = value {
+                    component(value, param_char, false, ErrorKind::UriParam)?;
+                }
+                params.push((name, value));
+            }
+        }
+
+        let mut headers = Vec::new();
+        if params_end < src.len() {
+            for pair in src[params_end + 1..].split('&') {
+                let (name, value) =
+                    pair.split_once('=').ok_or(ErrorKind::UriHeader)?;
+                component(name, header_char, false, ErrorKind::UriHeader)?;
+                component(value, header_char, true, ErrorKind::UriHeader)?;
+                headers.push((name, value));
+            }
+        }
+
+        Ok(Parts {
+            sips,
+            user,
+            password,
+            host: &src[host_start..host_end],
+            port,
+            params,
+            headers,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uri_seeds() {
+        for seed in [
+            &b"sip:alice@atlanta.example.com"[..],
+            b"SiPs:alice;phone?work/desk:secret%3a@[2001:db8::1]:005061;Transport=quic;lr?Subject=hello%20world&Subject=",
+            b"sip:[::ffff:192.0.2.1]",
+            b"sip:192.000.2.1",
+            b"sip:example.com;x=a=b",
+            b"sip:a%2@example.com",
+            b"tel:+1-201-555-0123",
+            b"\xff",
+        ] {
+            uri(seed);
+        }
+    }
 
     #[test]
     fn value_seeds() {

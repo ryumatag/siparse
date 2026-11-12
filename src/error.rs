@@ -94,6 +94,27 @@ pub enum ErrorKind {
     /// A Call-ID value is not `word [ "@" word ]`, where
     /// [`value::call_id`](crate::value::call_id) reads one.
     CallId,
+    /// A URI does not start with `sip:` or `sips:`, compared
+    /// case-insensitively, where [`uri::sip_uri`](crate::uri::sip_uri) reads
+    /// one.
+    UriScheme,
+    /// The `user` of a SIP URI is empty or has a byte outside its set.
+    UriUser,
+    /// The `password` of a SIP URI has a byte outside its set.
+    UriPassword,
+    /// The `host` of a SIP URI is not a hostname, an IPv4 address or an IPv6
+    /// reference.
+    UriHost,
+    /// What follows the `host` of a SIP URI, before its parameters, is not
+    /// `:` and one or more digits.
+    UriPort,
+    /// A parameter of a SIP URI has an empty or malformed name or value.
+    UriParam,
+    /// A header of a SIP URI is not a name, `=` and a value, or one of them
+    /// has a byte outside its set.
+    UriHeader,
+    /// A `%` in a SIP URI is not followed by two hexadecimal digits.
+    UriEscape,
     /// The caller-provided header storage is too small to hold every header
     /// row in the head.
     ///
@@ -199,6 +220,12 @@ impl Error {
         Error { kind: ErrorKind::CallId }
     }
 
+    /// Returns an error of `kind` for a part of a SIP URI.
+    #[inline]
+    pub(crate) const fn uri(kind: ErrorKind) -> Error {
+        Error { kind }
+    }
+
     /// Returns an error indicating that the caller-provided header row buffer
     /// was too small to hold all parsed header rows.
     #[inline]
@@ -225,6 +252,14 @@ impl ErrorKind {
             ErrorKind::Via => "invalid SIP via-parm",
             ErrorKind::CSeq => "invalid SIP CSeq",
             ErrorKind::CallId => "invalid SIP Call-ID",
+            ErrorKind::UriScheme => "expected a SIP or SIPS URI",
+            ErrorKind::UriUser => "invalid SIP URI user",
+            ErrorKind::UriPassword => "invalid SIP URI password",
+            ErrorKind::UriHost => "invalid SIP URI host",
+            ErrorKind::UriPort => "invalid SIP URI port",
+            ErrorKind::UriParam => "invalid SIP URI parameter",
+            ErrorKind::UriHeader => "invalid SIP URI header",
+            ErrorKind::UriEscape => "invalid SIP URI percent escape",
             ErrorKind::TooManyHeaders => {
                 "too many SIP headers for provided header buffer"
             }

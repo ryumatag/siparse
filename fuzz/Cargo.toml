@@ -54,3 +54,10 @@ path = "fuzz_targets/value.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "uri"
+path = "fuzz_targets/uri.rs"
+test = false
+doc = false
+bench = false
