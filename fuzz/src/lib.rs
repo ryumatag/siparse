@@ -550,7 +550,10 @@ pub fn check(input: &[u8]) {
 /// * [`value::address`](siparse::value::address) agrees with a list of one.
 /// * [`value::params`](siparse::value::params) agrees with the reference at
 ///   every character boundary.
-/// * [`value::tokens`](siparse::value::tokens) and
+/// * [`value::media_type`](siparse::value::media_type) agrees with the
+///   reference.
+/// * [`value::tokens`](siparse::value::tokens),
+///   [`value::media_ranges`](siparse::value::media_ranges) and
 ///   [`value::via_parms`](siparse::value::via_parms) agree with the
 ///   reference, and every list iterator leaves the same rest after each item.
 /// * [`value::cseq`](siparse::value::cseq) and
@@ -597,6 +600,31 @@ pub fn value(input: &[u8]) {
         tokens.push((item.map_err(|err| err.kind()), token_list.as_str()));
     }
     assert_eq!(tokens, reference::tokens(input), "tokens {input:?}");
+
+    fn media(m: value::MediaType<'_>) -> reference::Media<'_> {
+        let params = m.params.iter().map(|p| (p.name, p.value)).collect();
+        (m.kind, m.subtype, params, m.params.as_str())
+    }
+    let single = value::media_type(input).map(media).map_err(|e| e.kind());
+    assert_eq!(single, reference::media_type(input), "media_type {input:?}");
+
+    let mut ranges = Vec::new();
+    let mut range_list = value::media_ranges(input);
+    while let Some(item) = range_list.next() {
+        borrowed_range(input.as_bytes(), range_list.as_str());
+        let item = item.map(media).map_err(|err| err.kind());
+        if let Ok((kind, subtype, _, text)) = &item {
+            for part in [kind, subtype, text] {
+                borrowed_range(input.as_bytes(), part);
+            }
+        }
+        ranges.push((item, range_list.as_str()));
+    }
+    assert_eq!(
+        ranges,
+        reference::media_ranges(input),
+        "media_ranges {input:?}"
+    );
 
     let mut vias = Vec::new();
     let mut parms = value::via_parms(input);
@@ -768,17 +796,40 @@ mod reference {
     pub(crate) fn params(
         src: &str,
     ) -> Result<(Vec<Param<'_>>, &str, &str), ErrorKind> {
-        params_of(src, false)
+        params_of(src, Grammar::Generic)
     }
 
     /// `*( SEMI generic-param )`, or `*( SEMI via-params )` when `via` is
     /// set, which adds a `received` that holds a bare IPv6 address.
+    /// The parameter grammars the reference reads.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Grammar {
+        /// `generic-param`.
+        Generic,
+        /// `via-params`, which adds a bare IPv6 `received`.
+        Via,
+        /// `m-parameter`, which always has a token or quoted value.
+        MParam,
+        /// `accept-param` or `m-parameter`, where `q` holds a `qvalue`.
+        Accept,
+    }
+
+    fn is_qvalue(value: &str) -> bool {
+        let (whole, decimals) = value.split_once('.').unwrap_or((value, ""));
+        decimals.len() <= 3
+            && ((whole == "0" && decimals.bytes().all(|b| b.is_ascii_digit()))
+                || (whole == "1" && decimals.bytes().all(|b| b == b'0')))
+    }
+
     fn params_of(
         src: &str,
-        via: bool,
+        grammar: Grammar,
     ) -> Result<(Vec<Param<'_>>, &str, &str), ErrorKind> {
         let s = src.as_bytes();
-        let invalid = ErrorKind::GenericParam;
+        let invalid = match grammar {
+            Grammar::Generic | Grammar::Via => ErrorKind::GenericParam,
+            Grammar::MParam | Grammar::Accept => ErrorKind::MediaType,
+        };
         let mut list = Vec::new();
         let mut first = None;
         let mut end = 0;
@@ -799,6 +850,12 @@ mod reference {
 
             let eq = skip(s, name_end, is_ws);
             if s.get(eq) != Some(&b'=') {
+                let needs_value = grammar == Grammar::MParam
+                    || (grammar == Grammar::Accept
+                        && name.eq_ignore_ascii_case("q"));
+                if needs_value {
+                    return Err(invalid);
+                }
                 list.push((name, None));
                 end = name_end;
                 continue;
@@ -808,14 +865,14 @@ mod reference {
                 b.is_ascii_hexdigit() || b == b':' || b == b'.'
             });
             let value_end = match s.get(value_start) {
-                _ if via
+                _ if grammar == Grammar::Via
                     && name.eq_ignore_ascii_case("received")
                     && src[value_start..bare].contains(':') =>
                 {
                     bare
                 }
                 Some(b'"') => quoted_end(s, value_start).ok_or(invalid)?,
-                Some(b'[') => {
+                Some(b'[') if grammar != Grammar::MParam => {
                     let close = skip(s, value_start + 1, |b| {
                         b.is_ascii_hexdigit() || b == b':' || b == b'.'
                     });
@@ -830,7 +887,14 @@ mod reference {
             if value_end == value_start {
                 return Err(invalid);
             }
-            list.push((name, Some(&src[value_start..value_end])));
+            let value = &src[value_start..value_end];
+            if grammar == Grammar::Accept
+                && name.eq_ignore_ascii_case("q")
+                && !is_qvalue(value)
+            {
+                return Err(invalid);
+            }
+            list.push((name, Some(value)));
             end = value_end;
         }
 
@@ -1009,6 +1073,56 @@ mod reference {
         list(src, token_at, ErrorKind::Tokens)
     }
 
+    /// A media type or range: the kind, the subtype, the parameters and
+    /// their text.
+    pub(crate) type Media<'a> = (&'a str, &'a str, Vec<Param<'a>>, &'a str);
+
+    /// `m-type SLASH m-subtype` and parameters of `grammar` at `i`.
+    fn media_at(
+        src: &str,
+        i: usize,
+        grammar: Grammar,
+    ) -> Result<(Media<'_>, usize), ErrorKind> {
+        let s = src.as_bytes();
+        let invalid = ErrorKind::MediaType;
+        let kind_start = skip(s, i, is_ws);
+        let kind_end = skip(s, kind_start, is_token);
+        let slash = skip(s, kind_end, is_ws);
+        if kind_end == kind_start || s.get(slash) != Some(&b'/') {
+            return Err(invalid);
+        }
+        let subtype_start = skip(s, slash + 1, is_ws);
+        let subtype_end = skip(s, subtype_start, is_token);
+        if subtype_end == subtype_start {
+            return Err(invalid);
+        }
+        let kind = &src[kind_start..kind_end];
+        let subtype = &src[subtype_start..subtype_end];
+        if grammar == Grammar::Accept && kind == "*" && subtype != "*" {
+            return Err(invalid);
+        }
+        let (params, text, rest) = params_of(&src[subtype_end..], grammar)?;
+        Ok(((kind, subtype, params, text), src.len() - rest.len()))
+    }
+
+    pub(crate) fn media_type(src: &str) -> Result<Media<'_>, ErrorKind> {
+        let (media, end) = media_at(src, 0, Grammar::MParam)?;
+        if skip(src.as_bytes(), end, is_ws) != src.len() {
+            return Err(ErrorKind::MediaType);
+        }
+        Ok(media)
+    }
+
+    pub(crate) fn media_ranges(
+        src: &str,
+    ) -> Vec<(Result<Media<'_>, ErrorKind>, &str)> {
+        list(
+            src,
+            |src, i| media_at(src, i, Grammar::Accept),
+            ErrorKind::MediaType,
+        )
+    }
+
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub(crate) struct Via<'a> {
         protocol: &'a str,
@@ -1115,7 +1229,8 @@ mod reference {
             (None, host_end)
         };
 
-        let (params, params_text, rest) = params_of(&src[end..], true)?;
+        let (params, params_text, rest) =
+            params_of(&src[end..], Grammar::Via)?;
         let end = src.len() - rest.len();
         let via = Via {
             protocol,
@@ -1416,6 +1531,9 @@ mod tests {
             b"SIP/2.0/UDPh",
             b"100rel, timer,\r\n replaces",
             b"gzip,,identity",
+            b"text/plain; charset=\"utf-8\"",
+            b"application/sdp;level=1;q=0.8;ext, text/*;q=0.5, */*;q=0",
+            b"*/sdp;q=2",
             b"\xff",
         ] {
             value(seed);

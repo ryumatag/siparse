@@ -83,6 +83,28 @@ pub(super) fn value(c: &mut Criterion) {
         );
     }
 
+    // The Content-Type of an offer, and the Accept of a UA that takes SDP and
+    // multipart bodies.
+    let content_type = "application/sdp";
+    benchmark(c, "value/media_type", content_type.len() as u64, |b| {
+        b.iter(|| {
+            let found = bb(value::media_type(bb(content_type))).unwrap();
+            assert_eq!(found.subtype.len(), 3);
+        });
+    });
+
+    let accept = "application/sdp, multipart/mixed;q=0.5, */*;q=0.1";
+    benchmark(c, "value/media_ranges", accept.len() as u64, |b| {
+        b.iter(|| {
+            let mut n = 0;
+            for item in value::media_ranges(bb(accept)) {
+                bb(item.unwrap());
+                n += 1;
+            }
+            assert_eq!(n, 3);
+        });
+    });
+
     // The option tags a UA lists in Supported.
     let tags = "100rel, timer, replaces, norefersub";
     benchmark(c, "value/tokens", tags.len() as u64, |b| {

@@ -81,6 +81,14 @@ pub enum ErrorKind {
     /// A `;` is not followed by a `generic-param`, which is a `token`
     /// optionally followed by `=` and a `token`, `host` or `quoted-string`.
     GenericParam,
+    /// A value is not a media type, where
+    /// [`value::media_type`](crate::value::media_type) reads one, or not a
+    /// list of media ranges, where
+    /// [`value::media_ranges`](crate::value::media_ranges) reads one.
+    ///
+    /// This covers the parameters too, since an `m-parameter` is narrower
+    /// than a `generic-param` and a `q` has to hold a `qvalue`.
+    MediaType,
     /// A value is not a comma-separated list of tokens, where
     /// [`value::tokens`](crate::value::tokens) reads one.
     Tokens,
@@ -205,6 +213,12 @@ impl Error {
         Error { kind: ErrorKind::GenericParam }
     }
 
+    /// Returns an error indicating an invalid media type or media range.
+    #[inline]
+    pub(crate) const fn media_type() -> Error {
+        Error { kind: ErrorKind::MediaType }
+    }
+
     /// Returns an error indicating an invalid list of tokens.
     #[inline]
     pub(crate) const fn tokens() -> Error {
@@ -258,6 +272,7 @@ impl ErrorKind {
             ErrorKind::BareLf => "LF not preceded by CR",
             ErrorKind::Address => "invalid SIP name-addr or addr-spec",
             ErrorKind::GenericParam => "invalid SIP generic-param",
+            ErrorKind::MediaType => "invalid SIP media type",
             ErrorKind::Tokens => "invalid SIP token list",
             ErrorKind::Via => "invalid SIP via-parm",
             ErrorKind::CSeq => "invalid SIP CSeq",

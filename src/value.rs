@@ -6,8 +6,8 @@ or a `quoted-string`. The functions here put them together into the productions
 that several header grammars share, and return each part as written. From, To,
 Contact, Route, Record-Route and Reply-To all hold a `name-addr` or an
 `addr-spec` followed by `generic-param`s, so [`address`] and [`addresses`] read
-any of them. [`tokens`] reads the lists of tokens of Require, Supported, Allow
-and their kin, [`via_parms`] the values of a Via, and [`cseq`] and
+any of them. [`media_type`] and [`media_ranges`] read Content-Type and Accept,
+[`tokens`] the lists of tokens of Require, Supported, Allow and their kin, [`via_parms`] the values of a Via, and [`cseq`] and
 [`call_id`] the two values that, with the tags in From and To, tell which
 request and which dialog a message belongs to.
 
@@ -244,7 +244,7 @@ impl FusedIterator for ParamsIter<'_> {}
 /// ```
 #[inline]
 pub fn params(src: &str) -> Result<(Params<'_>, &str), Error> {
-    params_of(src, generic_param)
+    params_of(src, generic_param, Error::generic_param())
 }
 
 /// Reads a run of parameters from the start of `src`, each with `read`, as
@@ -256,6 +256,7 @@ pub fn params(src: &str) -> Result<(Params<'_>, &str), Error> {
 fn params_of(
     src: &str,
     read: fn(&str) -> Option<(Param<'_>, &str)>,
+    invalid: Error,
 ) -> Result<(Params<'_>, &str), Error> {
     let start = src.len() - scan::sws(src).len();
     let mut rest = src;
@@ -264,7 +265,7 @@ fn params_of(
     // is an error rather than the end of the run, since nothing else in a
     // header grammar starts with one.
     while scan::sws(rest).starts_with(';') {
-        let (_, tail) = read(rest).ok_or(Error::generic_param())?;
+        let (_, tail) = read(rest).ok_or(invalid)?;
         rest = tail;
     }
 
@@ -406,8 +407,8 @@ impl<'a> Iterator for Addresses<'a> {
 
 impl FusedIterator for Addresses<'_> {}
 
-/// The state of a comma-separated list, shared by [`Addresses`], [`Tokens`]
-/// and [`ViaParms`].
+/// The state of a comma-separated list, shared by [`Addresses`],
+/// [`MediaRanges`], [`Tokens`] and [`ViaParms`].
 #[derive(Clone, Debug)]
 struct List<'a> {
     /// What is left of the value. It is an empty slice at the end of the
@@ -815,6 +816,219 @@ impl<'a> Iterator for Tokens<'a> {
 
 impl FusedIterator for Tokens<'_> {}
 
+/// A media type, as Content-Type holds it, or a media range of Accept.
+///
+/// RFC 3261, Section 25.1:
+///
+/// ```text
+/// media-type   =  m-type SLASH m-subtype *(SEMI m-parameter)
+/// m-parameter  =  m-attribute EQUAL m-value
+/// m-value      =  token / quoted-string
+/// ```
+///
+/// Like [`Params`], two media types are equal when they are written the
+/// same. RFC 3261 compares types, subtypes and parameter names
+/// case-insensitively, which is left to the caller.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct MediaType<'a> {
+    /// The `m-type` as written, such as `application`, or `*` in a media
+    /// range.
+    pub kind: &'a str,
+    /// The `m-subtype` as written, such as `sdp`, or `*` in a media range.
+    pub subtype: &'a str,
+    /// The parameters, such as `charset` or, in a media range, `q`.
+    pub params: Params<'a>,
+}
+
+/// Reads a media type, the value of Content-Type.
+///
+/// Each parameter is an `m-parameter`, so unlike a `generic-param` it always
+/// has a value, and the value is a token or a quoted string.
+///
+/// # Errors
+///
+/// Returns an [`ErrorKind::MediaType`](crate::ErrorKind::MediaType) error if
+/// `src` is not `m-type SLASH m-subtype` followed by `m-parameter`s, with
+/// only whitespace around it.
+///
+/// # Example
+///
+/// ```
+/// use siparse::value;
+///
+/// let sdp = value::media_type("application/sdp")?;
+/// assert_eq!((sdp.kind, sdp.subtype), ("application", "sdp"));
+///
+/// let text = value::media_type("text/plain; charset=\"utf-8\"")?;
+/// let charset = text.params.iter().next().unwrap();
+/// assert_eq!((charset.name, charset.value), ("charset", Some("\"utf-8\"")));
+///
+/// assert!(value::media_type("text/plain;charset").is_err());
+/// # Ok::<(), siparse::Error>(())
+/// ```
+#[inline]
+pub fn media_type(src: &str) -> Result<MediaType<'_>, Error> {
+    let invalid = Error::media_type();
+
+    let (kind, subtype, rest) = type_and_subtype(src).ok_or(invalid)?;
+    let (params, rest) = params_of(rest, m_parameter, invalid)?;
+    if !scan::sws(rest).is_empty() {
+        return Err(invalid);
+    }
+
+    Ok(MediaType { kind, subtype, params })
+}
+
+/// Iterates over the media ranges of an Accept value.
+///
+/// RFC 3261, Section 25.1:
+///
+/// ```text
+/// Accept        =  "Accept" HCOLON [ accept-range *(COMMA accept-range) ]
+/// accept-range  =  media-range *(SEMI accept-param)
+/// media-range   =  ( "*/*" / ( m-type SLASH "*" ) / ( m-type SLASH m-subtype ) )
+///                  *( SEMI m-parameter )
+/// accept-param  =  ( "q" EQUAL qvalue ) / generic-param
+/// qvalue        =  ( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3("0") ] )
+/// ```
+///
+/// A range's `m-parameter`s and `accept-param`s are one run of parameters
+/// in [`MediaType::params`]. Each is a `generic-param`, and a `q` holds a
+/// `qvalue`. As in HTTP, the parameters before `q` belong to the media range
+/// and those after it are accept extensions, which is for the caller to
+/// split. An `m-type` of `*` takes only a `*` subtype.
+///
+/// As with [`addresses`], each item is a range or the error that ends the
+/// list, and a list has at least one range. An Accept value may also be
+/// empty, so check for that before calling this.
+///
+/// # Errors
+///
+/// An item is an [`ErrorKind::MediaType`](crate::ErrorKind::MediaType) error
+/// where the list does not go on with a media range.
+///
+/// # Example
+///
+/// ```
+/// use siparse::value;
+///
+/// let mut accept = value::media_ranges("application/sdp, text/*;q=0.5, */*;q=0");
+/// let sdp = accept.next().unwrap()?;
+/// assert_eq!((sdp.kind, sdp.subtype), ("application", "sdp"));
+/// let text = accept.next().unwrap()?;
+/// assert_eq!((text.kind, text.subtype, text.params.as_str()), ("text", "*", ";q=0.5"));
+/// assert_eq!(accept.next().unwrap()?.kind, "*");
+/// assert!(accept.next().is_none());
+///
+/// assert!(value::media_ranges("*/sdp").next().unwrap().is_err());
+/// # Ok::<(), siparse::Error>(())
+/// ```
+#[inline]
+pub fn media_ranges(src: &str) -> MediaRanges<'_> {
+    MediaRanges { list: List::new(src) }
+}
+
+/// An iterator over the media ranges of an Accept value.
+///
+/// See [`media_ranges`].
+#[derive(Clone, Debug)]
+pub struct MediaRanges<'a> {
+    list: List<'a>,
+}
+
+impl<'a> MediaRanges<'a> {
+    /// Returns what is left of the value after the ranges read so far.
+    ///
+    /// After a range that a `,` follows, this is the rest of the value past
+    /// the `,`, as written, whitespace included. Once the list has ended, by
+    /// its last range or by an error, it is empty.
+    #[inline]
+    pub fn as_str(&self) -> &'a str {
+        self.list.rest
+    }
+}
+
+impl<'a> Iterator for MediaRanges<'a> {
+    type Item = Result<MediaType<'a>, Error>;
+
+    fn next(&mut self) -> Option<Result<MediaType<'a>, Error>> {
+        self.list.next(media_range_prefix, Error::media_type())
+    }
+}
+
+impl FusedIterator for MediaRanges<'_> {}
+
+/// Reads an `accept-range` from the start of `src`, returning what follows
+/// it.
+fn media_range_prefix(src: &str) -> Result<(MediaType<'_>, &str), Error> {
+    let invalid = Error::media_type();
+
+    let (kind, subtype, rest) = type_and_subtype(src).ok_or(invalid)?;
+    // `*` is a `token`, so the grammar's three forms of `media-range` come
+    // down to this one rule.
+    if kind == "*" && subtype != "*" {
+        return Err(invalid);
+    }
+    let (params, rest) = params_of(rest, accept_param, invalid)?;
+
+    Ok((MediaType { kind, subtype, params }, rest))
+}
+
+/// Reads `m-type SLASH m-subtype` from the start of `src`, after any
+/// whitespace.
+#[inline]
+fn type_and_subtype(src: &str) -> Option<(&str, &str, &str)> {
+    // Every form of `m-type` and `m-subtype`, `x-token` included, is a
+    // `token`.
+    let (kind, rest) = scan::token(scan::sws(src))?;
+    let rest = scan::separator(rest, '/')?;
+    let (subtype, rest) = scan::token(rest)?;
+    Some((kind, subtype, rest))
+}
+
+/// Reads `SEMI m-parameter` from the start of `src`, returning the
+/// parameter and what follows it.
+#[inline]
+fn m_parameter(src: &str) -> Option<(Param<'_>, &str)> {
+    let rest = scan::separator(src, ';')?;
+    let (name, rest) = scan::token(rest)?;
+    let value = scan::separator(rest, '=')?;
+    let (value, rest) = match value.as_bytes().first()? {
+        b'"' => scan::quoted_string(value)?,
+        _ => scan::token(value)?,
+    };
+    Some((Param { name, value: Some(value) }, rest))
+}
+
+/// Reads `SEMI accept-param`, or an `m-parameter`, which every
+/// `generic-param` covers, from the start of `src`.
+#[inline]
+fn accept_param(src: &str) -> Option<(Param<'_>, &str)> {
+    let (param, rest) = generic_param(src)?;
+    if param.name.eq_ignore_ascii_case("q")
+        && !param.value.map_or(false, is_qvalue)
+    {
+        return None;
+    }
+    Some((param, rest))
+}
+
+/// Returns whether `src` is a `qvalue`, a weight from 0 to 1 with at most
+/// three decimals.
+fn is_qvalue(src: &str) -> bool {
+    let (whole, decimals) = match src.split_once('.') {
+        Some((whole, decimals)) => (whole, Some(decimals)),
+        None => (src, None),
+    };
+    let decimals = decimals.unwrap_or("");
+    decimals.len() <= 3
+        && match whole {
+            "0" => decimals.bytes().all(|b| b.is_ascii_digit()),
+            "1" => decimals.bytes().all(|b| b == b'0'),
+            _ => false,
+        }
+}
+
 /// A `via-parm`, one value of a Via header.
 ///
 /// RFC 3261, Section 25.1:
@@ -951,7 +1165,7 @@ fn via_parm_prefix(src: &str) -> Result<(ViaParm<'_>, &str), Error> {
         }
         None => (None, rest),
     };
-    let (params, rest) = params_of(rest, via_param)?;
+    let (params, rest) = params_of(rest, via_param, Error::generic_param())?;
 
     let text = &src[..src.len() - rest.len()];
     let via =
@@ -1736,6 +1950,113 @@ mod tests {
         );
         assert_eq!(list.as_str(), "");
         assert_eq!(list.next(), None);
+    }
+
+    fn media(src: &str) -> Result<(&str, &str, Vec<Param<'_>>), ErrorKind> {
+        media_type(src)
+            .map(|m| (m.kind, m.subtype, m.params.iter().collect()))
+            .map_err(|err| err.kind())
+    }
+
+    #[test]
+    fn media_types() {
+        for (src, kind, subtype, params) in [
+            ("application/sdp", "application", "sdp", vec![]),
+            (
+                " multipart/mixed ;\r\n boundary=unique-boundary-1 ",
+                "multipart",
+                "mixed",
+                vec![param("boundary", Some("unique-boundary-1"))],
+            ),
+            (
+                "text/plain;charset=\"utf-8\";format=flowed",
+                "text",
+                "plain",
+                vec![
+                    param("charset", Some("\"utf-8\"")),
+                    param("format", Some("flowed")),
+                ],
+            ),
+            ("Application / SDP", "Application", "SDP", vec![]),
+            (
+                "application/x-private;x=\"a;b,c\"",
+                "application",
+                "x-private",
+                vec![param("x", Some("\"a;b,c\""))],
+            ),
+        ] {
+            assert_eq!(media(src), Ok((kind, subtype, params)), "{src:?}");
+        }
+
+        for src in [
+            "",
+            "application",
+            "application/",
+            "/sdp",
+            "application sdp",
+            "application/sdp;",
+            "application/sdp;charset",
+            "application/sdp;charset=",
+            "application/sdp;x=[::1]",
+            "application/sdp;x=\"open",
+            "application/sdp junk",
+            "application/sdp, text/plain",
+            "appl\u{e9}cation/sdp",
+        ] {
+            assert_eq!(media(src), Err(ErrorKind::MediaType), "{src:?}");
+        }
+    }
+
+    #[test]
+    fn media_ranges_and_their_weights() {
+        let src =
+            "application/sdp;level=1;q=0.8;ext, text/*;q=0.5,\r\n */*;q=0";
+        let ranges: Vec<_> = media_ranges(src).map(|r| r.unwrap()).collect();
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(
+            (ranges[0].kind, ranges[0].subtype),
+            ("application", "sdp")
+        );
+        assert_eq!(
+            ranges[0].params.iter().collect::<Vec<_>>(),
+            [
+                param("level", Some("1")),
+                param("q", Some("0.8")),
+                param("ext", None)
+            ]
+        );
+        assert_eq!((ranges[1].kind, ranges[1].subtype), ("text", "*"));
+        assert_eq!((ranges[2].kind, ranges[2].subtype), ("*", "*"));
+
+        for q in ["0", "0.", "0.5", "0.123", "1", "1.", "1.000", "Q=1"] {
+            let src = if q.starts_with('Q') {
+                format!("*/*;{q}")
+            } else {
+                format!("*/*;q={q}")
+            };
+            assert!(media_ranges(&src).next().unwrap().is_ok(), "{src:?}");
+        }
+        for src in [
+            "*/*;q=2",
+            "*/*;q=1.5",
+            "*/*;q=0.1234",
+            "*/*;q=.5",
+            "*/*;q=",
+            "*/*;q",
+            "*/*;q=\"1\"",
+            "*/sdp",
+            "*/sdp;q=1",
+            "",
+            "application/sdp,",
+            ",application/sdp",
+        ] {
+            let first = media_ranges(src).collect::<Result<Vec<_>, _>>();
+            assert_eq!(
+                first.map_err(|err| err.kind()),
+                Err(ErrorKind::MediaType),
+                "{src:?}"
+            );
+        }
     }
 
     #[test]
