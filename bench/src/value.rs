@@ -83,6 +83,25 @@ pub(super) fn value(c: &mut Criterion) {
         );
     }
 
+    // The top Via of a request a proxy has filled in, with every parameter a
+    // transaction layer reads and an extension, walked the way it reads them.
+    let proxied = concat!(
+        "SIP/2.0/UDP 192.0.2.4:5060;ttl=16;maddr=224.2.0.1;received=192.0.2.207",
+        ";rport=49154;branch=z9hG4bK776asdhds;x-trace=\"a;b\",",
+        "SIP/2.0/UDP pc33.atlanta.example.com;branch=z9hG4bK776asdhdt",
+    );
+    benchmark(c, "value/via_parms/proxied", proxied.len() as u64, |b| {
+        b.iter(|| {
+            let top = value::via_parms(bb(proxied)).next().unwrap().unwrap();
+            let mut n = 0;
+            for param in bb(top).params {
+                bb(param);
+                n += 1;
+            }
+            assert_eq!(n, 6);
+        });
+    });
+
     // The Content-Type of an offer, and the Accept of a UA that takes SDP and
     // multipart bodies.
     let content_type = "application/sdp";
