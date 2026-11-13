@@ -9,12 +9,12 @@ Contact, Route, Record-Route and Reply-To all hold a `name-addr` or an
 any of them. [`challenge`] and [`credentials`] read the authentication
 headers, [`media_type`] and [`media_ranges`] Content-Type and Accept,
 [`token_param`] and [`token_params`] the many headers that are a token with
-parameters,
-[`tokens`] the lists of tokens of Require, Supported, Allow and their kin, [`via_parms`] the values of a Via, and [`cseq`] and
-[`call_id`] the two values that, with the tags in From and To, tell which
-request and which dialog a message belongs to. [`call_id_params`] reads a
-dialog named by its Call-ID and tags, as Replaces, Join and Target-Dialog
-hold it.
+parameters, [`tokens`] the lists of tokens of Require, Supported, Allow and
+their kin, [`via_parms`] the values of a Via, [`via_parm`] its top value one
+parameter at a time, and [`cseq`] and [`call_id`] the two values that, with
+the tags in From and To, tell which request and which dialog a message
+belongs to. [`call_id_params`] reads a dialog named by its Call-ID and
+tags, as Replaces, Join and Target-Dialog hold it.
 
 # Example
 
@@ -603,7 +603,12 @@ fn checked_param(src: &str) -> Option<(Param<'_>, &str)> {
 /// stops at a `:`, so the common parameters are read once.
 #[inline]
 fn via_param(src: &str) -> Option<(Param<'_>, &str)> {
-    let rest = scan::separator(src, ';')?;
+    via_param_after_semi(scan::separator(src, ';')?)
+}
+
+/// Reads a `via-params` after its `;` and the whitespace after it.
+#[inline(always)]
+fn via_param_after_semi(rest: &str) -> Option<(Param<'_>, &str)> {
     let (name, rest) = scan::token(rest)?;
 
     let Some(value) = scan::separator(rest, '=') else {
@@ -1510,6 +1515,9 @@ pub struct ViaParm<'a> {
 /// `generic-param`s, except that a `received` may also be an IPv6 address
 /// without brackets, as `via-received` has it.
 ///
+/// Each value's parameters are checked before it is returned. To look at
+/// every parameter of the top value, [`via_parm`] reads them once.
+///
 /// # Errors
 ///
 /// An item is an [`ErrorKind::Via`](crate::ErrorKind::Via) error where the
@@ -1579,6 +1587,72 @@ impl FusedIterator for ViaParms<'_> {}
 
 /// Reads a `via-parm` from the start of `src`, returning what follows it.
 fn via_parm_prefix(src: &str) -> Result<(ViaParm<'_>, &str), Error> {
+    let reader = via_parm(src)?;
+    let (params, rest) =
+        params_of(reader.rest, via_param, Error::generic_param())?;
+
+    let text = &reader.src[..reader.src.len() - rest.len()];
+    let via = ViaParm {
+        protocol: reader.protocol,
+        version: reader.version,
+        transport: reader.transport,
+        host: reader.host,
+        port: reader.port,
+        params,
+        text,
+    };
+    Ok((via, rest))
+}
+
+/// Starts reading the first `via-parm` of a Via value, and reads its
+/// parameters as the caller asks for them.
+///
+/// [`via_parms`] checks every parameter of a value before it returns it, so
+/// a caller that then looks at each one reads them twice. The reader checks
+/// each one as it returns it instead. A transaction layer, which needs the
+/// `branch`, `received` and `rport` of the top value of each message it
+/// receives, reads them once this way.
+///
+/// The `sent-protocol` and `sent-by` are read when the reader is made.
+/// Iterating it yields each parameter in order, or the error that ends the
+/// value. Once the parameters have ended, it checks that the value ends or
+/// goes on with a `,`, the way [`via_parms`] does, and then it ends.
+///
+/// # Errors
+///
+/// Returns an [`ErrorKind::Via`](crate::ErrorKind::Via) error if `src` does
+/// not start with a `sent-protocol` and a `sent-by`. While iterating, an item
+/// is an [`ErrorKind::GenericParam`](crate::ErrorKind::GenericParam) error
+/// where a parameter is malformed, and an
+/// [`ErrorKind::Via`](crate::ErrorKind::Via) error where the value does not
+/// end or go on with a `,` after the parameters.
+///
+/// # Example
+///
+/// ```
+/// use siparse::value;
+///
+/// let value = "SIP/2.0/UDP pc33.atlanta.example.com;branch=z9hG4bK776asdhds;rport\
+///              , SIP/2.0/UDP bigbox3.site3.atlanta.example.com";
+/// let mut top = value::via_parm(value)?;
+/// assert_eq!((top.transport, top.host, top.port), ("UDP", "pc33.atlanta.example.com", None));
+///
+/// let mut branch = None;
+/// for param in &mut top {
+///     let param = param?;
+///     if param.name.eq_ignore_ascii_case("branch") {
+///         branch = param.value;
+///     }
+/// }
+/// assert_eq!(branch, Some("z9hG4bK776asdhds"));
+///
+/// // A server that fills in `rport` writes its value where the text ends.
+/// assert!(top.text().ends_with(";rport"));
+/// assert_eq!(top.as_str(), " SIP/2.0/UDP bigbox3.site3.atlanta.example.com");
+/// # Ok::<(), siparse::Error>(())
+/// ```
+#[inline]
+pub fn via_parm(src: &str) -> Result<ViaParmReader<'_>, Error> {
     let invalid = Error::via();
     let src = scan::sws(src);
 
@@ -1598,13 +1672,116 @@ fn via_parm_prefix(src: &str) -> Result<(ViaParm<'_>, &str), Error> {
         }
         None => (None, rest),
     };
-    let (params, rest) = params_of(rest, via_param, Error::generic_param())?;
 
-    let text = &src[..src.len() - rest.len()];
-    let via =
-        ViaParm { protocol, version, transport, host, port, params, text };
-    Ok((via, rest))
+    let text_len = src.len() - rest.len();
+    Ok(ViaParmReader {
+        protocol,
+        version,
+        transport,
+        host,
+        port,
+        src,
+        rest,
+        text_len,
+        done: false,
+    })
 }
+
+/// A `via-parm` whose parameters are read one at a time.
+///
+/// See [`via_parm`]. The parts before the parameters are the same as in a
+/// [`ViaParm`].
+#[derive(Clone, Debug)]
+pub struct ViaParmReader<'a> {
+    /// The `protocol-name`, such as `SIP`.
+    pub protocol: &'a str,
+    /// The `protocol-version`, such as `2.0`.
+    pub version: &'a str,
+    /// The `transport`, such as `UDP`.
+    pub transport: &'a str,
+    /// The `host` of `sent-by` as written, so an IPv6 reference keeps its
+    /// brackets.
+    pub host: &'a str,
+    /// The `port` of `sent-by` as written, if there is one.
+    pub port: Option<&'a str>,
+    /// The value from the start of the `via-parm`.
+    src: &'a str,
+    /// What is left of the value. It is an empty slice at its end once the
+    /// reader has failed, so that it still points into it.
+    rest: &'a str,
+    /// The length of the `via-parm` read so far.
+    text_len: usize,
+    /// Whether the reader has ended, after the `via-parm` or an error.
+    done: bool,
+}
+
+impl<'a> ViaParmReader<'a> {
+    /// Returns the `via-parm` as written, from the protocol name to the end
+    /// of the last parameter read so far.
+    ///
+    /// Once the reader has ended without an error, this is the whole
+    /// `via-parm`, as [`ViaParm::text`] has it.
+    #[inline]
+    pub fn text(&self) -> &'a str {
+        &self.src[..self.text_len]
+    }
+
+    /// Returns what is left of the value after what has been read.
+    ///
+    /// While parameters are left, this starts with them. Once the reader has
+    /// ended after a `via-parm` that a `,` follows, it is the rest of the
+    /// value past the `,`, as [`ViaParms::as_str`] has it, and after the last
+    /// `via-parm` or an error it is empty.
+    #[inline]
+    pub fn as_str(&self) -> &'a str {
+        self.rest
+    }
+
+    /// Ends the reader after an error, leaving an empty rest that still
+    /// points into the value.
+    #[cold]
+    fn fail(&mut self, err: Error) -> Error {
+        self.rest = &self.rest[self.rest.len()..];
+        self.done = true;
+        err
+    }
+}
+
+impl<'a> Iterator for ViaParmReader<'a> {
+    type Item = Result<Param<'a>, Error>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Result<Param<'a>, Error>> {
+        if self.done {
+            return None;
+        }
+
+        // As in `params_of`, a `;` with no parameter after it is an error
+        // rather than the end of the parameters.
+        let tail = scan::sws(self.rest);
+        if let Some(after) = tail.strip_prefix(';') {
+            let Some((param, rest)) = via_param_after_semi(scan::sws(after))
+            else {
+                return Some(Err(self.fail(Error::generic_param())));
+            };
+            self.rest = rest;
+            self.text_len = self.src.len() - rest.len();
+            return Some(Ok(param));
+        }
+
+        self.done = true;
+        if let Some(next) = tail.strip_prefix(',') {
+            self.rest = next;
+        } else if tail.is_empty() {
+            self.rest = tail;
+        } else {
+            return Some(Err(self.fail(Error::via())));
+        }
+        None
+    }
+}
+
+impl FusedIterator for ViaParmReader<'_> {}
 
 #[cfg(test)]
 mod tests {
@@ -2296,6 +2473,114 @@ mod tests {
 
         // An extension value outside `generic-param` ends the value early.
         assert_eq!(via_list("SIP/2.0/UDP host;x=a/b"), Err(ErrorKind::Via));
+    }
+
+    /// Reads the first `via-parm` of `src` with [`via_parm`], returning the
+    /// result the way [`via_parms`] gives its first item, with the rest.
+    fn read_top(src: &str) -> (Result<ViaParm<'_>, ErrorKind>, &str) {
+        let mut reader = match via_parm(src) {
+            Ok(reader) => reader,
+            Err(err) => return (Err(err.kind()), &src[src.len()..]),
+        };
+        let mut params = Vec::new();
+        for param in &mut reader {
+            match param {
+                Ok(param) => params.push(param),
+                Err(err) => return (Err(err.kind()), reader.as_str()),
+            }
+        }
+
+        // The reader checked each parameter, so the text holds the same run
+        // that `via_parms` checks.
+        let text = reader.text();
+        let start = text.len() - text.trim_start_matches(|c| c != ';').len();
+        let via = ViaParm {
+            protocol: reader.protocol,
+            version: reader.version,
+            transport: reader.transport,
+            host: reader.host,
+            port: reader.port,
+            params: Params { src: &text[start..] },
+            text,
+        };
+        assert_eq!(via.params.iter().collect::<Vec<_>>(), params, "{src:?}");
+        (Ok(via), reader.as_str())
+    }
+
+    #[test]
+    fn via_parm_reads_the_top_value_as_via_parms_does() {
+        for src in [
+            "SIP/2.0/UDP pc33.atlanta.example.com:5060;branch=z9hG4bK776asdhds",
+            "SIP/2.0/TCP 192.0.2.4",
+            " sip / 2.0 /\r\n udp \t host : 5060 ;\r\n branch = z9hG4bK1 ",
+            "SIP/2.0/UDP h;received=2001:db8::9;rport;x=\"q,;\" ,\r\n SIP/2.0/TCP b",
+            "SIP/2.0/UDP [2001:db8::1]:5060;maddr=[::1];ttl=16, SIP/2.0/UDP c",
+            "SIP/2.0/UDP a,,SIP/2.0/UDP b",
+            "SIP/2.0/UDP host junk",
+            "SIP/2.0/UDP host;",
+            "SIP/2.0/UDP host;branch=",
+            "SIP/2.0/UDP host;x=\"open",
+            "SIP/2.0/UDP h;received=g:1",
+            "SIP/2.0/UDP h;x=a/b",
+            "SIP/2.0/UDP",
+            "SIP/2.0 UDP host",
+            "",
+        ] {
+            let mut vias = via_parms(src);
+            let item = vias.next().unwrap().map_err(|err| err.kind());
+            let (top, rest) = read_top(src);
+            assert_eq!(top, item, "{src:?}");
+            assert_eq!(rest, vias.as_str(), "{src:?}");
+            assert_borrowed(src, rest);
+        }
+    }
+
+    #[test]
+    fn via_parm_text_grows_with_each_param() {
+        let src = "SIP/2.0/UDP h ; rport ;branch=z9hG4bK1 , SIP/2.0/UDP b";
+        let mut reader = via_parm(src).unwrap();
+        assert_eq!(reader.text(), "SIP/2.0/UDP h");
+        assert_eq!(
+            reader.as_str(),
+            " ; rport ;branch=z9hG4bK1 , SIP/2.0/UDP b"
+        );
+
+        assert_eq!(reader.next(), Some(Ok(param("rport", None))));
+        assert_eq!(reader.text(), "SIP/2.0/UDP h ; rport");
+        assert_eq!(reader.next(), Some(Ok(param("branch", Some("z9hG4bK1")))));
+        assert_eq!(reader.text(), "SIP/2.0/UDP h ; rport ;branch=z9hG4bK1");
+
+        assert_eq!(reader.next(), None);
+        assert_eq!(reader.text(), "SIP/2.0/UDP h ; rport ;branch=z9hG4bK1");
+        assert_eq!(reader.as_str(), " SIP/2.0/UDP b");
+        assert_eq!(reader.next(), None);
+    }
+
+    #[test]
+    fn a_failed_via_parm_leaves_nothing() {
+        let src = "SIP/2.0/UDP h;rport;;branch=z9hG4bK1";
+        let mut reader = via_parm(src).unwrap();
+        assert_eq!(reader.next(), Some(Ok(param("rport", None))));
+        assert_eq!(
+            reader.next().map(|item| item.map_err(|err| err.kind())),
+            Some(Err(ErrorKind::GenericParam))
+        );
+        assert_eq!(reader.text(), "SIP/2.0/UDP h;rport");
+        assert_eq!(reader.as_str(), "");
+        assert_borrowed(src, reader.as_str());
+        assert_eq!(reader.next(), None);
+    }
+
+    #[test]
+    fn every_via_parm_prefix_reads_as_via_parms_does() {
+        let value = "SIP/2.0/UDP [2001:db8::1]:5060;branch=z9hG4bK1;received=2001:db8::9;x=\"\u{7530};,\", SIP/2.0/TCP h";
+        let ends = value.char_indices().map(|(i, _)| i);
+        for end in ends.chain([value.len()]) {
+            let src = &value[..end];
+            let item =
+                via_parms(src).next().unwrap().map_err(|err| err.kind());
+            assert_eq!(read_top(src).0, item, "{src:?}");
+        }
     }
 
     #[test]

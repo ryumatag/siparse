@@ -583,6 +583,8 @@ pub fn check(input: &[u8]) {
 ///   [`value::media_ranges`](siparse::value::media_ranges) and
 ///   [`value::via_parms`](siparse::value::via_parms) agree with the
 ///   reference, and every list iterator leaves the same rest after each item.
+/// * [`value::via_parm`](siparse::value::via_parm) reads the first
+///   `via-parm` as `via_parms` does, and leaves the same rest.
 /// * [`value::cseq`](siparse::value::cseq),
 ///   [`value::call_id`](siparse::value::call_id) and
 ///   [`value::call_id_params`](siparse::value::call_id_params) agree with
@@ -709,6 +711,48 @@ pub fn value(input: &[u8]) {
         vias.push((item, parms.as_str()));
     }
     assert_eq!(vias, reference::via_parms(input), "via_parms {input:?}");
+
+    // `via_parm` reads the first `via-parm` as `via_parms` does, one
+    // parameter at a time.
+    let top = value::via_parm(input).map_err(|err| err.kind()).and_then(
+        |mut reader| {
+            let mut params = Vec::new();
+            while let Some(param) = reader.next() {
+                borrowed_range(input.as_bytes(), reader.as_str());
+                borrowed_range(input.as_bytes(), reader.text());
+                let param = param.map_err(|err| err.kind())?;
+                params.push((param.name, param.value));
+            }
+            // A checked run starts at its first `;`, and nothing before the
+            // parameters holds one.
+            let text = reader.text();
+            let start = text.find(';').unwrap_or(text.len());
+            let via = reference::Via {
+                protocol: reader.protocol,
+                version: reader.version,
+                transport: reader.transport,
+                host: reader.host,
+                port: reader.port,
+                params_text: &text[start..],
+                params,
+                text,
+            };
+            via.check_borrowed(input);
+            Ok((via, reader.as_str()))
+        },
+    );
+    match (top, &vias[0]) {
+        (Ok((via, rest)), (Ok(expected), expected_rest)) => {
+            assert_eq!(via, *expected, "via_parm {input:?}");
+            assert_eq!(rest, *expected_rest, "via_parm {input:?}");
+        }
+        (Err(kind), (Err(expected), _)) => {
+            assert_eq!(kind, *expected, "via_parm {input:?}");
+        }
+        (top, expected) => {
+            panic!("via_parm {input:?}: {top:?} against {expected:?}")
+        }
+    }
 
     let single = value::address(input)
         .map(reference::Address::from)
@@ -1316,14 +1360,14 @@ mod reference {
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub(crate) struct Via<'a> {
-        protocol: &'a str,
-        version: &'a str,
-        transport: &'a str,
-        host: &'a str,
-        port: Option<&'a str>,
-        params_text: &'a str,
-        params: Vec<Param<'a>>,
-        text: &'a str,
+        pub(crate) protocol: &'a str,
+        pub(crate) version: &'a str,
+        pub(crate) transport: &'a str,
+        pub(crate) host: &'a str,
+        pub(crate) port: Option<&'a str>,
+        pub(crate) params_text: &'a str,
+        pub(crate) params: Vec<Param<'a>>,
+        pub(crate) text: &'a str,
     }
 
     impl<'a> From<value::ViaParm<'a>> for Via<'a> {

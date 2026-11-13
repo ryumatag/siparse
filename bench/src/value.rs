@@ -102,6 +102,20 @@ pub(super) fn value(c: &mut Criterion) {
         });
     });
 
+    // The same, with the parameters read as they are checked.
+    benchmark(c, "value/via_parm/proxied", proxied.len() as u64, |b| {
+        b.iter(|| {
+            let mut top = value::via_parm(bb(proxied)).unwrap();
+            let mut n = 0;
+            for param in &mut top {
+                bb(param.unwrap());
+                n += 1;
+            }
+            assert_eq!(bb(top.text()).len(), 120);
+            assert_eq!(n, 6);
+        });
+    });
+
     // The Content-Type of an offer, and the Accept of a UA that takes SDP and
     // multipart bodies.
     let content_type = "application/sdp";
