@@ -1001,6 +1001,12 @@ mod reference {
                     && name.eq_ignore_ascii_case("received")
                     && src[value_start..bare].contains(':') =>
                 {
+                    if src[value_start..bare]
+                        .parse::<std::net::Ipv6Addr>()
+                        .is_err()
+                    {
+                        return Err(invalid);
+                    }
                     bare
                 }
                 Some(b'"') => quoted_end(s, value_start).ok_or(invalid)?,
@@ -1010,6 +1016,11 @@ mod reference {
                     });
                     if close == value_start + 1 || s.get(close) != Some(&b']')
                     {
+                        return Err(invalid);
+                    }
+                    if !super::reference_uri::host(
+                        &src[value_start..close + 1],
+                    ) {
                         return Err(invalid);
                     }
                     close + 1
@@ -1448,7 +1459,9 @@ mod reference {
                 b.is_ascii_alphanumeric() || b"-.".contains(&b)
             })
         };
-        if host_end == host_start {
+        if host_end == host_start
+            || !super::reference_uri::host(&src[host_start..host_end])
+        {
             return Err(invalid);
         }
 
@@ -1733,7 +1746,7 @@ mod reference_uri {
         Ok(())
     }
 
-    fn host(src: &str) -> bool {
+    pub(super) fn host(src: &str) -> bool {
         if let Some(inner) =
             src.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
         {
@@ -1890,6 +1903,36 @@ mod tests {
             b"\xff",
         ] {
             uri(seed);
+        }
+    }
+
+    #[test]
+    fn value_host_structure() {
+        for host in [
+            "-",
+            "a..example",
+            "01.2.3.4",
+            "256.0.0.1",
+            "[:::]",
+            "[1]",
+            "[::1]",
+            "[::ffff:192.0.2.1]",
+            "[::ffff:256.0.0.1]",
+        ] {
+            for input in [
+                format!("SIP/2.0/UDP {host}"),
+                format!("<sip:a@b>;x={host}"),
+                format!("SIP/2.0/UDP h;received={host}"),
+            ] {
+                for end in 0..=input.len() {
+                    value(&input.as_bytes()[..end]);
+                }
+            }
+        }
+        for host in
+            [":", ":::", "1::2::3", "12345::1", "::1", "::ffff:256.0.0.1"]
+        {
+            value(format!("SIP/2.0/UDP h;received={host}").as_bytes());
         }
     }
 

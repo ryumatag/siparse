@@ -6,6 +6,36 @@ use siparse::value;
 use crate::benchmark;
 
 pub(super) fn value(c: &mut Criterion) {
+    // Structural host checks serve both sent-by and bracketed parameters.
+    for (category, input) in [
+        ("hostname", "SIP/2.0/UDP proxy.example.com."),
+        ("ipv4", "SIP/2.0/UDP 192.0.2.4"),
+        ("ipv6", "SIP/2.0/UDP [2001:db8::192.0.2.4]"),
+    ] {
+        benchmark(
+            c,
+            format!("value/via_host/{category}"),
+            input.len() as u64,
+            |b| {
+                b.iter(|| {
+                    let mut values = value::via_parms(bb(input));
+                    bb(values.next().unwrap().unwrap());
+                    assert!(values.next().is_none());
+                });
+            },
+        );
+    }
+    let bracketed = "<sip:alice@example.com>;x=[2001:db8::1]";
+    benchmark(c, "value/address/host_param", bracketed.len() as u64, |b| {
+        b.iter(|| {
+            let address = bb(value::address(bb(bracketed))).unwrap();
+            assert_eq!(
+                address.params.iter().next().unwrap().value,
+                Some("[2001:db8::1]")
+            );
+        });
+    });
+
     // From and To values in each form, with the tag a dialog needs. The
     // throughput counts the whole value.
     let addresses = [

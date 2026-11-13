@@ -312,6 +312,7 @@ mod macros;
 pub mod check;
 mod error;
 pub mod frame;
+mod host;
 mod iter;
 mod parse;
 pub mod scan;

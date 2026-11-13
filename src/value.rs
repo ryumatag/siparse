@@ -65,6 +65,8 @@ relax are worth knowing:
   therefore read as header parameters, so in
   `tel:+12015550123;phone-context=example.com` the `phone-context` is one of
   [`Address::params`].
+* Hosts follow RFC 3261 with RFC 5954's corrected IP grammar. A token
+  parameter value is not required to be a host.
 * A list has no empty elements, so a leading, trailing or doubled `,` is an
   error.
 */
@@ -73,6 +75,7 @@ use core::iter::FusedIterator;
 
 use crate::{
     error::Error,
+    host::{is_host, is_ipv6},
     scan::{self, split_run},
     simd,
 };
@@ -616,19 +619,21 @@ fn via_param_after_semi(rest: &str) -> Option<(Param<'_>, &str)> {
     };
     let (value, rest) = match value.as_bytes().first()? {
         b'"' => scan::quoted_string(value)?,
-        b'[' => scan::host(value)?,
+        b'[' => validated_host(value)?,
         _ => {
             let token = scan::token(value);
             match token {
                 Some((_, rest)) if !rest.starts_with(':') => token?,
                 // A bare IPv6 address, which a `token` stops in at its first
-                // `:`, or cannot read at all when it starts with `::`. Like
-                // `scan::host`, this checks the character class only. When
+                // `:`, or cannot read at all when it starts with `::`. When
                 // the address run ends inside the token, the `:` is not part
                 // of the value, and the token stands as a `via-extension`.
                 _ if name.eq_ignore_ascii_case("received") => {
                     match split_run(value, simd::match_ipv6_vectored) {
                         Some((address, rest)) if address.contains(':') => {
+                            if !is_ipv6(address) {
+                                return None;
+                            }
                             (address, rest)
                         }
                         _ => token?,
@@ -639,6 +644,14 @@ fn via_param_after_semi(rest: &str) -> Option<(Param<'_>, &str)> {
         }
     };
     Some((Param { name, value: Some(value) }, rest))
+}
+
+/// Reads the lexical extent before applying the shared host grammar.
+/// A checked parameter iterator uses the lexical scan alone.
+#[inline]
+fn validated_host(src: &str) -> Option<(&str, &str)> {
+    let (host, rest) = scan::host(src)?;
+    is_host(host).then_some((host, rest))
 }
 
 /// Reads `SEMI generic-param` from the start of `src`, returning the
@@ -656,7 +669,7 @@ fn generic_param(src: &str) -> Option<(Param<'_>, &str)> {
     // `token` covers, or an `IPv6reference`, which only `host` reads.
     let (value, rest) = match value.as_bytes().first()? {
         b'"' => scan::quoted_string(value)?,
-        b'[' => scan::host(value)?,
+        b'[' => validated_host(value)?,
         _ => scan::token(value)?,
     };
     Some((Param { name, value: Some(value) }, rest))
@@ -1664,7 +1677,7 @@ pub fn via_parm(src: &str) -> Result<ViaParmReader<'_>, Error> {
     let (transport, rest) = scan::token(rest).ok_or(invalid)?;
 
     let rest = scan::lws(rest).ok_or(invalid)?;
-    let (host, rest) = scan::host(rest).ok_or(invalid)?;
+    let (host, rest) = validated_host(rest).ok_or(invalid)?;
     let (port, rest) = match scan::separator(rest, ':') {
         Some(after) => {
             let (port, rest) = scan::digits(after).ok_or(invalid)?;
@@ -2323,6 +2336,83 @@ mod tests {
 
     fn via_list(src: &str) -> Result<Vec<ViaParm<'_>>, ErrorKind> {
         via_parms(src).collect::<Result<_, _>>().map_err(|err| err.kind())
+    }
+
+    #[test]
+    fn host_structure_matches_uri_hosts() {
+        for (host, valid) in [
+            ("proxy.example.com.", true),
+            ("a-b.example", true),
+            ("192.0.2.4", true),
+            ("[::]", true),
+            ("[::1]", true),
+            ("[2001:db8::192.0.2.4]", true),
+            ("-", false),
+            ("a..example.com", false),
+            ("-a.example", false),
+            ("a-.example", false),
+            ("example.123", false),
+            ("256.0.0.1", false),
+            ("01.2.3.4", false),
+            ("[:::]", false),
+            ("[1]", false),
+            ("[1::2::3]", false),
+            ("[::ffff:256.0.0.1]", false),
+        ] {
+            let src = format!("SIP/2.0/UDP {host}:5060;branch=test");
+            assert!(crate::check::header_value(src.as_bytes()).is_ok());
+            assert_eq!(
+                crate::uri::sip_uri(&format!("sip:{host}")).is_ok(),
+                valid
+            );
+            assert_eq!(via_list(&src).is_ok(), valid, "{src}");
+            assert_eq!(read_top(&src).0.is_ok(), valid, "reader {src}");
+            if !valid {
+                assert_eq!(via_list(&src), Err(ErrorKind::Via), "{src}");
+            }
+            if host.starts_with('[') {
+                let param = format!(";x={host}");
+                assert_eq!(params(&param).is_ok(), valid, "{param}");
+                let address = format!("<sip:a@example.com>{param}");
+                assert_eq!(
+                    super::address(&address).is_ok(),
+                    valid,
+                    "{address}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn received_validates_ipv6_without_narrowing_extension_tokens() {
+        for bad in [":", ":::1", "1::2::3", "12345::1", "::ffff:256.0.0.1"] {
+            let src = format!("SIP/2.0/UDP h;received={bad}");
+            assert_eq!(via_list(&src), Err(ErrorKind::GenericParam), "{src}");
+            assert_eq!(
+                read_top(&src).0,
+                Err(ErrorKind::GenericParam),
+                "{src}"
+            );
+        }
+        // A token remains a generic extension even when it is no host.
+        for token in ["-", "a..example.com", "256.0.0.1", "01.2.3.4"] {
+            let src = format!(";x={token};received={token}");
+            assert_eq!(params(&src).unwrap().0.iter().count(), 2);
+            assert!(via_list(&format!("SIP/2.0/UDP h{src}")).is_ok());
+        }
+    }
+
+    #[test]
+    fn bracketed_host_prefixes_need_a_complete_address() {
+        let host = "[2001:db8::192.0.2.4]";
+        for end in 0..host.len() {
+            let prefix = &host[..end];
+            assert!(via_list(&format!("SIP/2.0/UDP {prefix}")).is_err());
+            assert!(params(&format!(";x={prefix}")).is_err());
+        }
+        let src = format!("SIP/2.0/UDP {host};received=2001:db8::192.0.2.4");
+        assert!(via_list(&src).is_ok());
+        assert!(read_top(&src).0.is_ok());
     }
 
     #[test]
