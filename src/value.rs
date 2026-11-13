@@ -598,26 +598,42 @@ fn checked_param(src: &str) -> Option<(Param<'_>, &str)> {
 /// not, since its `IPv6address` has no brackets and holds `:`. A `received`
 /// that a `generic-param` reads, such as a bracketed address, still matches
 /// `via-extension`.
+///
+/// This reads a `generic-param` and only looks at the name when the value
+/// stops at a `:`, so the common parameters are read once.
 #[inline]
 fn via_param(src: &str) -> Option<(Param<'_>, &str)> {
     let rest = scan::separator(src, ';')?;
     let (name, rest) = scan::token(rest)?;
 
-    if name.eq_ignore_ascii_case("received") {
-        if let Some(value) = scan::separator(rest, '=') {
-            // A run with a `:` is no `token`, so it can only be an address.
-            // Like `scan::host`, this checks the character class only.
-            if let Some((address, rest)) =
-                split_run(value, simd::match_ipv6_vectored)
-            {
-                if address.contains(':') {
-                    return Some((Param { name, value: Some(address) }, rest));
+    let Some(value) = scan::separator(rest, '=') else {
+        return Some((Param { name, value: None }, rest));
+    };
+    let (value, rest) = match value.as_bytes().first()? {
+        b'"' => scan::quoted_string(value)?,
+        b'[' => scan::host(value)?,
+        _ => {
+            let token = scan::token(value);
+            match token {
+                Some((_, rest)) if !rest.starts_with(':') => token?,
+                // A bare IPv6 address, which a `token` stops in at its first
+                // `:`, or cannot read at all when it starts with `::`. Like
+                // `scan::host`, this checks the character class only. When
+                // the address run ends inside the token, the `:` is not part
+                // of the value, and the token stands as a `via-extension`.
+                _ if name.eq_ignore_ascii_case("received") => {
+                    match split_run(value, simd::match_ipv6_vectored) {
+                        Some((address, rest)) if address.contains(':') => {
+                            (address, rest)
+                        }
+                        _ => token?,
+                    }
                 }
+                _ => token?,
             }
         }
-    }
-
-    generic_param(src)
+    };
+    Some((Param { name, value: Some(value) }, rest))
 }
 
 /// Reads `SEMI generic-param` from the start of `src`, returning the
@@ -2203,6 +2219,26 @@ mod tests {
             via_list("SIP/2.0/UDP h;x=2001:db8::9"),
             Err(ErrorKind::Via)
         );
+
+        // An address that starts with `::`, which no `token` reads, and one
+        // that ends the value before a byte that is no `token`.
+        let list = via_list("SIP/2.0/UDP h;received=::1;received = fe80::1 ")
+            .unwrap();
+        assert_eq!(
+            list[0].params.iter().collect::<Vec<_>>(),
+            [
+                param("received", Some("::1")),
+                param("received", Some("fe80::1")),
+            ]
+        );
+
+        // A token whose address run stops before the `:` is a
+        // `via-extension`, and the `:` after it ends the value.
+        for src in
+            ["SIP/2.0/UDP h;received=g:1", "SIP/2.0/UDP h;received=1g:1"]
+        {
+            assert_eq!(via_list(src), Err(ErrorKind::Via), "{src:?}");
+        }
     }
 
     #[test]
