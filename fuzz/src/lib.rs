@@ -182,7 +182,7 @@ macro_rules! harness {
             };
             let fields = [$(head.start_line.$field.map(|s| borrowed_range(input, s))),+];
             let rows: Vec<_> = head.headers.iter().map(|row| {
-                (borrowed_range(input, row.name), borrowed_range(input, row.value))
+                (borrowed_range(input, row.name), borrowed_range(input, row.value.as_str()))
             }).collect();
             assert!(rows.len() <= N);
             let mut previous_end = 0;
@@ -276,7 +276,10 @@ fn check_any_head(input: &[u8]) {
         .headers
         .iter()
         .map(|row| {
-            (borrowed_range(input, row.name), borrowed_range(input, row.value))
+            (
+                borrowed_range(input, row.name),
+                borrowed_range(input, row.value.as_str()),
+            )
         })
         .collect();
 
@@ -347,7 +350,7 @@ harness!(
 /// input in two at the reference's position, with both halves borrowed from
 /// it.
 pub fn scan(input: &[u8]) {
-    use siparse::scan;
+    use siparse::{scan, HeaderValue};
 
     let Ok(input) = std::str::from_utf8(input) else {
         return;
@@ -448,39 +451,76 @@ pub fn scan(input: &[u8]) {
     let starts = input.char_indices().map(|(i, _)| i);
     for start in starts.chain([input.len()]) {
         let src = &input[start..];
+        let Ok(checked) = HeaderValue::new(src) else { continue };
         let ws = whitespace(src);
 
-        assert_eq!(scan::sws(src), &src[ws..], "sws {src:?}");
+        assert_eq!(scan::sws(checked).as_str(), &src[ws..], "sws {src:?}");
         assert_eq!(
-            scan::lws(src),
+            scan::lws(checked).map(HeaderValue::as_str),
             (ws > 0).then(|| &src[ws..]),
             "lws {src:?}"
         );
-        for sep in [';', ',', ':', '=', '/', '\u{e9}'] {
+        for (sep, kind) in [
+            (';', scan::Separator::Semi),
+            (',', scan::Separator::Comma),
+            (':', scan::Separator::Colon),
+            ('=', scan::Separator::Equal),
+            ('/', scan::Separator::Slash),
+        ] {
             let expected = src[ws..]
                 .strip_prefix(sep)
                 .map(|rest| &rest[whitespace(rest)..]);
             assert_eq!(
-                scan::separator(src, sep),
+                scan::separator(checked, kind).map(HeaderValue::as_str),
                 expected,
                 "separator {sep:?} {src:?}"
             );
         }
-        check(src, scan::token(src), run(src, is_token), "token");
         check(
             src,
-            scan::digits(src),
+            scan::token(checked).map(|(t, r)| {
+                assert!(HeaderValue::new(r.as_str()).is_ok());
+                (t, r.as_str())
+            }),
+            run(src, is_token),
+            "token",
+        );
+        check(
+            src,
+            scan::digits(checked).map(|(t, r)| {
+                assert!(HeaderValue::new(r.as_str()).is_ok());
+                (t, r.as_str())
+            }),
             run(src, |b| b.is_ascii_digit()),
             "digits",
         );
-        check(src, scan::host(src), host(src), "host");
         check(
             src,
-            scan::quoted_string(src),
+            scan::host(checked).map(|(t, r)| {
+                assert!(HeaderValue::new(r.as_str()).is_ok());
+                (t, r.as_str())
+            }),
+            host(src).filter(|(h, _)| reference_uri::host(h)),
+            "host",
+        );
+        check(
+            src,
+            scan::quoted_string(checked).map(|(t, r)| {
+                assert!(HeaderValue::new(r.as_str()).is_ok());
+                (t, r.as_str())
+            }),
             quoted_string(src),
             "quoted_string",
         );
-        check(src, scan::comment(src), comment(src), "comment");
+        check(
+            src,
+            scan::comment(checked).map(|(t, r)| {
+                assert!(HeaderValue::new(r.as_str()).is_ok());
+                (t, r.as_str())
+            }),
+            comment(src),
+            "comment",
+        );
     }
 }
 
@@ -529,8 +569,8 @@ pub fn check(input: &[u8]) {
         ),
         (
             "header_value",
-            check::header_value,
-            check::header_value_const,
+            |s| check::header_value(s).map(siparse::HeaderValue::as_str),
+            |s| check::header_value_const(s).map(siparse::HeaderValue::as_str),
             check::header_value_error_offset,
         ),
     ];
@@ -593,21 +633,14 @@ pub fn check(input: &[u8]) {
 pub fn value(input: &[u8]) {
     use siparse::value;
 
-    // Any `&str` is safe to pass, even one that no header value matches.
-    // There the results are unspecified, but every part must be borrowed.
-    let Ok(text) = std::str::from_utf8(input) else {
-        return;
-    };
-    for address in value::addresses(text).flatten() {
-        reference::Address::from(address).check_borrowed(text);
-    }
-
     let Ok(input) = siparse::check::header_value(input) else {
         return;
     };
 
+    let input = input.as_str();
     let mut list = Vec::new();
-    let mut addresses = value::addresses(input);
+    let mut addresses =
+        value::addresses(siparse::HeaderValue::new(input).unwrap());
     while let Some(item) = addresses.next() {
         borrowed_range(input.as_bytes(), addresses.as_str());
         let item = item.map(reference::Address::from).map_err(|e| e.kind());
@@ -622,7 +655,8 @@ pub fn value(input: &[u8]) {
     let list: Vec<_> = list.into_iter().map(|(item, _)| item).collect();
 
     let mut tokens = Vec::new();
-    let mut token_list = value::tokens(input);
+    let mut token_list =
+        value::tokens(siparse::HeaderValue::new(input).unwrap());
     while let Some(item) = token_list.next() {
         borrowed_range(input.as_bytes(), token_list.as_str());
         if let Ok(token) = item {
@@ -636,12 +670,14 @@ pub fn value(input: &[u8]) {
         let params = t.params.iter().map(|p| (p.name, p.value)).collect();
         (t.token, params, t.params.as_str())
     }
-    let single =
-        value::token_param(input).map(token_param).map_err(|e| e.kind());
+    let single = value::token_param(siparse::HeaderValue::new(input).unwrap())
+        .map(token_param)
+        .map_err(|e| e.kind());
     assert_eq!(single, reference::token_param(input), "token_param {input:?}");
 
     let mut items = Vec::new();
-    let mut item_list = value::token_params(input);
+    let mut item_list =
+        value::token_params(siparse::HeaderValue::new(input).unwrap());
     while let Some(item) = item_list.next() {
         borrowed_range(input.as_bytes(), item_list.as_str());
         let item = item.map(token_param).map_err(|err| err.kind());
@@ -661,10 +697,15 @@ pub fn value(input: &[u8]) {
         let params = a.params.iter().map(|p| (p.name, p.value)).collect();
         (a.scheme, params, a.params.as_str())
     }
-    let challenge = value::challenge(input).map(auth).map_err(|e| e.kind());
+    let challenge =
+        value::challenge(siparse::HeaderValue::new(input).unwrap())
+            .map(auth)
+            .map_err(|e| e.kind());
     assert_eq!(challenge, reference::auth(input), "challenge {input:?}");
     let credentials =
-        value::credentials(input).map(auth).map_err(|e| e.kind());
+        value::credentials(siparse::HeaderValue::new(input).unwrap())
+            .map(auth)
+            .map_err(|e| e.kind());
     assert_eq!(credentials, challenge, "credentials {input:?}");
     if let Ok((scheme, params, text)) = &challenge {
         borrowed_range(input.as_bytes(), scheme);
@@ -679,11 +720,14 @@ pub fn value(input: &[u8]) {
         let params = m.params.iter().map(|p| (p.name, p.value)).collect();
         (m.kind, m.subtype, params, m.params.as_str())
     }
-    let single = value::media_type(input).map(media).map_err(|e| e.kind());
+    let single = value::media_type(siparse::HeaderValue::new(input).unwrap())
+        .map(media)
+        .map_err(|e| e.kind());
     assert_eq!(single, reference::media_type(input), "media_type {input:?}");
 
     let mut ranges = Vec::new();
-    let mut range_list = value::media_ranges(input);
+    let mut range_list =
+        value::media_ranges(siparse::HeaderValue::new(input).unwrap());
     while let Some(item) = range_list.next() {
         borrowed_range(input.as_bytes(), range_list.as_str());
         let item = item.map(media).map_err(|err| err.kind());
@@ -701,7 +745,8 @@ pub fn value(input: &[u8]) {
     );
 
     let mut vias = Vec::new();
-    let mut parms = value::via_parms(input);
+    let mut parms =
+        value::via_parms(siparse::HeaderValue::new(input).unwrap());
     while let Some(item) = parms.next() {
         borrowed_range(input.as_bytes(), parms.as_str());
         let item = item.map(reference::Via::from).map_err(|e| e.kind());
@@ -714,8 +759,9 @@ pub fn value(input: &[u8]) {
 
     // `via_parm` reads the first `via-parm` as `via_parms` does, one
     // parameter at a time.
-    let top = value::via_parm(input).map_err(|err| err.kind()).and_then(
-        |mut reader| {
+    let top = value::via_parm(siparse::HeaderValue::new(input).unwrap())
+        .map_err(|err| err.kind())
+        .and_then(|mut reader| {
             let mut params = Vec::new();
             while let Some(param) = reader.next() {
                 borrowed_range(input.as_bytes(), reader.as_str());
@@ -739,8 +785,7 @@ pub fn value(input: &[u8]) {
             };
             via.check_borrowed(input);
             Ok((via, reader.as_str()))
-        },
-    );
+        });
     match (top, &vias[0]) {
         (Ok((via, rest)), (Ok(expected), expected_rest)) => {
             assert_eq!(via, *expected, "via_parm {input:?}");
@@ -754,7 +799,7 @@ pub fn value(input: &[u8]) {
         }
     }
 
-    let single = value::address(input)
+    let single = value::address(siparse::HeaderValue::new(input).unwrap())
         .map(reference::Address::from)
         .map_err(|err| err.kind());
     let expected = match list.as_slice() {
@@ -767,7 +812,7 @@ pub fn value(input: &[u8]) {
     };
     assert_eq!(single, expected, "address {input:?}");
 
-    let cseq = value::cseq(input)
+    let cseq = value::cseq(siparse::HeaderValue::new(input).unwrap())
         .map(|cseq| (cseq.number, cseq.method))
         .map_err(|err| err.kind());
     assert_eq!(cseq, reference::cseq(input), "cseq {input:?}");
@@ -776,12 +821,14 @@ pub fn value(input: &[u8]) {
         borrowed_range(input.as_bytes(), method);
     }
 
-    let with_params = value::call_id_params(input)
-        .map(|c| {
-            let params = c.params.iter().map(|p| (p.name, p.value)).collect();
-            (c.call_id, params, c.params.as_str())
-        })
-        .map_err(|err| err.kind());
+    let with_params =
+        value::call_id_params(siparse::HeaderValue::new(input).unwrap())
+            .map(|c| {
+                let params =
+                    c.params.iter().map(|p| (p.name, p.value)).collect();
+                (c.call_id, params, c.params.as_str())
+            })
+            .map_err(|err| err.kind());
     assert_eq!(
         with_params,
         reference::call_id_params(input),
@@ -792,7 +839,8 @@ pub fn value(input: &[u8]) {
         borrowed_range(input.as_bytes(), text);
     }
 
-    let call_id = value::call_id(input).map_err(|err| err.kind());
+    let call_id = value::call_id(siparse::HeaderValue::new(input).unwrap())
+        .map_err(|err| err.kind());
     assert_eq!(call_id, reference::call_id(input), "call_id {input:?}");
     if let Ok(call_id) = call_id {
         borrowed_range(input.as_bytes(), call_id);
@@ -801,11 +849,12 @@ pub fn value(input: &[u8]) {
     let starts = input.char_indices().map(|(i, _)| i);
     for start in starts.chain([input.len()]) {
         let src = &input[start..];
-        let actual = value::params(src)
+        let Ok(checked) = siparse::HeaderValue::new(src) else { continue };
+        let actual = value::params(checked)
             .map(|(params, rest)| {
                 let list: Vec<_> =
                     params.iter().map(|p| (p.name, p.value)).collect();
-                (list, params.as_str(), rest)
+                (list, params.as_str(), rest.as_str())
             })
             .map_err(|err| err.kind());
         assert_eq!(actual, reference::params(src), "params {src:?}");

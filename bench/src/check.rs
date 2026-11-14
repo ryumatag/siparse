@@ -33,15 +33,15 @@ pub(super) fn check(c: &mut Criterion) {
         (
             "header_value",
             b"SIP/2.0/UDP pc33.atlanta.example.com;branch=z9hG4bK776asdhds",
-            check::header_value,
-            check::header_value_const,
+            |s| check::header_value(s).map(siparse::HeaderValue::as_str),
+            |s| check::header_value_const(s).map(siparse::HeaderValue::as_str),
         ),
         (
             "header_value/utf8",
             "\"\u{7530}\u{4e2d}\" <sip:tanaka@example.com>;tag=1928301774"
                 .as_bytes(),
-            check::header_value,
-            check::header_value_const,
+            |s| check::header_value(s).map(siparse::HeaderValue::as_str),
+            |s| check::header_value_const(s).map(siparse::HeaderValue::as_str),
         ),
     ];
 

@@ -1,7 +1,7 @@
 /*!
 Parses the RFC 3261 productions that header values are built from.
 
-[`scan`] finds the lexical elements of a value, such as a `token`
+[`scan`](crate::scan) finds the lexical elements of a value, such as a `token`
 or a `quoted-string`. The functions here put them together into the productions
 that several header grammars share, and return each part as written. From, To,
 Contact, Route, Record-Route and Reply-To all hold a `name-addr` or an
@@ -19,9 +19,10 @@ tags, as Replaces, Join and Target-Dialog hold it.
 # Example
 
 ```
-use siparse::value;
+use siparse::{value, HeaderValue};
 
-let to = value::address("\"Bob\" <sip:bob@biloxi.example.com>;tag=a6c85cf")?;
+let input = HeaderValue::new("\"Bob\" <sip:bob@biloxi.example.com>;tag=a6c85cf")?;
+let to = value::address(input)?;
 assert_eq!(to.display_name, Some("\"Bob\""));
 assert_eq!(to.uri, "sip:bob@biloxi.example.com");
 
@@ -47,10 +48,11 @@ The parts are syntax only:
 
 # Input
 
-As with [`scan`], the input is a header value as the parser or
-[`check::header_value`](crate::check::header_value) returned it, so `CR` and
-`LF` only occur in folds. Whitespace before and after it is allowed, since a
-header value keeps its trailing whitespace.
+The input is a [`HeaderValue`] returned by the head parser or
+[`check::header_value`](crate::check::header_value). Arbitrary strings must
+pass [`HeaderValue::new`] first, so `CR` and `LF` only occur in folds.
+Whitespace before and after it is allowed, since a header value keeps its
+trailing whitespace.
 
 # Strictness
 
@@ -76,8 +78,8 @@ use core::iter::FusedIterator;
 use crate::{
     error::Error,
     host::{is_host, is_ipv6},
-    scan::{self, split_run},
-    simd,
+    scan::raw::{self as scan, split_run},
+    simd, HeaderValue,
 };
 
 /// A `name-addr` or an `addr-spec` with the header parameters after it.
@@ -108,9 +110,10 @@ pub struct Address<'a> {
     /// `name-addr *( SEMI rr-param )`:
     ///
     /// ```
-    /// use siparse::value;
+    /// use siparse::{value, HeaderValue};
     ///
-    /// let route = value::address("sip:p1.example.com;lr")?;
+    /// let input = HeaderValue::new("sip:p1.example.com;lr")?;
+    /// let route = value::address(input)?;
     /// assert!(!route.bracketed);
     /// # Ok::<(), siparse::Error>(())
     /// ```
@@ -157,9 +160,10 @@ impl<'a> Params<'a> {
     /// # Example
     ///
     /// ```
-    /// use siparse::value;
+    /// use siparse::{value, HeaderValue};
     ///
-    /// let address = value::address("<sip:alice@atlanta.example.com> ; tag=9fxced76sl ")?;
+    /// let input = HeaderValue::new("<sip:alice@atlanta.example.com> ; tag=9fxced76sl ")?;
+    /// let address = value::address(input)?;
     /// assert_eq!(address.params.as_str(), "; tag=9fxced76sl");
     /// # Ok::<(), siparse::Error>(())
     /// ```
@@ -237,9 +241,10 @@ impl FusedIterator for ParamsIter<'_> {}
 /// # Example
 ///
 /// ```
-/// use siparse::{scan, value};
+/// use siparse::{scan, value, HeaderValue};
 ///
-/// let (disposition, rest) = scan::token("session;handling=required").unwrap();
+/// let input = HeaderValue::new("session;handling=required")?;
+/// let (disposition, rest) = scan::token(input).unwrap();
 /// assert_eq!(disposition, "session");
 ///
 /// let (params, rest) = value::params(rest)?;
@@ -247,11 +252,21 @@ impl FusedIterator for ParamsIter<'_> {}
 /// assert_eq!((handling.name, handling.value), ("handling", Some("required")));
 /// assert_eq!(rest, "");
 ///
-/// assert!(value::params(";handling=").is_err());
+/// let input = HeaderValue::new(";handling=")?;
+/// assert!(value::params(input).is_err());
 /// # Ok::<(), siparse::Error>(())
 /// ```
 #[inline]
-pub fn params(src: &str) -> Result<(Params<'_>, &str), Error> {
+pub fn params(
+    src: HeaderValue<'_>,
+) -> Result<(Params<'_>, HeaderValue<'_>), Error> {
+    let (params, rest) =
+        params_of(src.as_str(), generic_param, Error::generic_param())?;
+    Ok((params, HeaderValue::from_validated(rest)))
+}
+
+#[inline]
+fn params_raw(src: &str) -> Result<(Params<'_>, &str), Error> {
     params_of(src, generic_param, Error::generic_param())
 }
 
@@ -305,23 +320,27 @@ fn params_of(
 /// # Example
 ///
 /// ```
-/// use siparse::value;
+/// use siparse::{value, HeaderValue};
 ///
-/// let from = value::address("Alice <sip:alice@atlanta.example.com>;tag=1928301774")?;
+/// let input = HeaderValue::new("Alice <sip:alice@atlanta.example.com>;tag=1928301774")?;
+/// let from = value::address(input)?;
 /// assert_eq!(from.display_name, Some("Alice"));
 /// assert_eq!(from.uri, "sip:alice@atlanta.example.com");
 /// assert!(from.bracketed);
 ///
 /// // Without angle brackets, the parameters belong to the header.
-/// let to = value::address("sip:bob@biloxi.example.com;tag=a6c85cf")?;
+/// let input = HeaderValue::new("sip:bob@biloxi.example.com;tag=a6c85cf")?;
+/// let to = value::address(input)?;
 /// assert_eq!(to.uri, "sip:bob@biloxi.example.com");
 /// assert_eq!(to.params.as_str(), ";tag=a6c85cf");
 ///
-/// assert!(value::address("<sip:a@example.com>, <sip:b@example.com>").is_err());
+/// let input = HeaderValue::new("<sip:a@example.com>, <sip:b@example.com>")?;
+/// assert!(value::address(input).is_err());
 /// # Ok::<(), siparse::Error>(())
 /// ```
 #[inline]
-pub fn address(src: &str) -> Result<Address<'_>, Error> {
+pub fn address(src: HeaderValue<'_>) -> Result<Address<'_>, Error> {
+    let src = src.as_str();
     let (address, rest) = address_prefix(src)?;
     if !scan::sws(rest).is_empty() {
         return Err(Error::address());
@@ -354,22 +373,25 @@ pub fn address(src: &str) -> Result<Address<'_>, Error> {
 /// # Example
 ///
 /// ```
-/// use siparse::value;
+/// use siparse::{value, HeaderValue};
 ///
 /// let value = "<sip:p1.example.com;lr>,\r\n <sip:p2.example.com;lr>";
-/// let mut routes = value::addresses(value);
+/// let input = HeaderValue::new(value)?;
+/// let mut routes = value::addresses(input);
 /// assert_eq!(routes.next().unwrap()?.uri, "sip:p1.example.com;lr");
 /// assert_eq!(routes.next().unwrap()?.uri, "sip:p2.example.com;lr");
 /// assert!(routes.next().is_none());
 ///
-/// let mut routes = value::addresses("<sip:p1.example.com;lr>,");
+/// let input = HeaderValue::new("<sip:p1.example.com;lr>,")?;
+/// let mut routes = value::addresses(input);
 /// assert!(routes.next().unwrap().is_ok());
 /// assert!(routes.next().unwrap().is_err());
 /// assert!(routes.next().is_none());
 /// # Ok::<(), siparse::Error>(())
 /// ```
 #[inline]
-pub fn addresses(src: &str) -> Addresses<'_> {
+pub fn addresses(src: HeaderValue<'_>) -> Addresses<'_> {
+    let src = src.as_str();
     Addresses { list: List::new(src) }
 }
 
@@ -392,9 +414,10 @@ impl<'a> Addresses<'a> {
     /// # Example
     ///
     /// ```
-    /// use siparse::value;
+    /// use siparse::{value, HeaderValue};
     ///
-    /// let mut routes = value::addresses("<sip:p1.example.com;lr>, <sip:p2.example.com;lr>");
+    /// let input = HeaderValue::new("<sip:p1.example.com;lr>, <sip:p2.example.com;lr>")?;
+    /// let mut routes = value::addresses(input);
     /// routes.next().unwrap()?;
     /// assert_eq!(routes.as_str(), " <sip:p2.example.com;lr>");
     /// # Ok::<(), siparse::Error>(())
@@ -482,7 +505,7 @@ fn address_prefix(src: &str) -> Result<(Address<'_>, &str), Error> {
             (None, uri, false, rest)
         }
     };
-    let (params, rest) = params(rest)?;
+    let (params, rest) = params_raw(rest)?;
 
     Ok((Address { display_name, uri, bracketed, params }, rest))
 }
@@ -704,17 +727,20 @@ pub struct CSeq<'a> {
 /// # Example
 ///
 /// ```
-/// use siparse::value;
+/// use siparse::{value, HeaderValue};
 ///
-/// let cseq = value::cseq("314159 INVITE")?;
+/// let input = HeaderValue::new("314159 INVITE")?;
+/// let cseq = value::cseq(input)?;
 /// assert_eq!(cseq.number.parse::<u32>(), Ok(314159));
 /// assert_eq!(cseq.method, "INVITE");
 ///
-/// assert!(value::cseq("1INVITE").is_err());
+/// let input = HeaderValue::new("1INVITE")?;
+/// assert!(value::cseq(input).is_err());
 /// # Ok::<(), siparse::Error>(())
 /// ```
 #[inline]
-pub fn cseq(src: &str) -> Result<CSeq<'_>, Error> {
+pub fn cseq(src: HeaderValue<'_>) -> Result<CSeq<'_>, Error> {
+    let src = src.as_str();
     let invalid = Error::cseq();
 
     let (number, rest) = scan::digits(scan::sws(src)).ok_or(invalid)?;
@@ -748,14 +774,17 @@ pub fn cseq(src: &str) -> Result<CSeq<'_>, Error> {
 /// # Example
 ///
 /// ```
-/// use siparse::value;
+/// use siparse::{value, HeaderValue};
 ///
-/// assert_eq!(value::call_id(" f81d4fae-7dec-11d0@192.0.2.4 ")?, "f81d4fae-7dec-11d0@192.0.2.4");
-/// assert!(value::call_id("a@b@c").is_err());
+/// let input = HeaderValue::new(" f81d4fae-7dec-11d0@192.0.2.4 ")?;
+/// assert_eq!(value::call_id(input)?, "f81d4fae-7dec-11d0@192.0.2.4");
+/// let input = HeaderValue::new("a@b@c")?;
+/// assert!(value::call_id(input).is_err());
 /// # Ok::<(), siparse::Error>(())
 /// ```
 #[inline]
-pub fn call_id(src: &str) -> Result<&str, Error> {
+pub fn call_id(src: HeaderValue<'_>) -> Result<&str, Error> {
+    let src = src.as_str();
     let (call_id, rest) = call_id_prefix(src).ok_or(Error::call_id())?;
     if !scan::sws(rest).is_empty() {
         return Err(Error::call_id());
@@ -803,11 +832,12 @@ pub struct CallIdParams<'a> {
 /// # Example
 ///
 /// ```
-/// use siparse::value;
+/// use siparse::{value, HeaderValue};
 ///
-/// let replaces = value::call_id_params(
+/// let input = HeaderValue::new(
 ///     "98732@sip.example.com;from-tag=r33th4x0r;to-tag=ff87ff;early-only",
 /// )?;
+/// let replaces = value::call_id_params(input)?;
 /// assert_eq!(replaces.call_id, "98732@sip.example.com");
 ///
 /// let names: Vec<_> = replaces.params.iter().map(|p| p.name).collect();
@@ -815,7 +845,10 @@ pub struct CallIdParams<'a> {
 /// # Ok::<(), siparse::Error>(())
 /// ```
 #[inline]
-pub fn call_id_params(src: &str) -> Result<CallIdParams<'_>, Error> {
+pub fn call_id_params(
+    src: HeaderValue<'_>,
+) -> Result<CallIdParams<'_>, Error> {
+    let src = src.as_str();
     let invalid = Error::call_id();
 
     let (call_id, rest) = call_id_prefix(src).ok_or(invalid)?;
@@ -878,18 +911,22 @@ fn call_id_prefix(src: &str) -> Option<(&str, &str)> {
 /// # Example
 ///
 /// ```
-/// use siparse::value;
+/// use siparse::{value, HeaderValue};
 ///
-/// let mut tags = value::tokens("100rel,\r\n timer");
+/// let input = HeaderValue::new("100rel,\r\n timer")?;
+/// let mut tags = value::tokens(input);
 /// assert_eq!(tags.next(), Some(Ok("100rel")));
 /// assert_eq!(tags.as_str(), "\r\n timer");
 /// assert_eq!(tags.next(), Some(Ok("timer")));
 /// assert_eq!(tags.next(), None);
 ///
-/// assert!(value::tokens("100rel timer").next().unwrap().is_err());
+/// let input = HeaderValue::new("100rel timer")?;
+/// assert!(value::tokens(input).next().unwrap().is_err());
+/// # Ok::<(), siparse::Error>(())
 /// ```
 #[inline]
-pub fn tokens(src: &str) -> Tokens<'_> {
+pub fn tokens(src: HeaderValue<'_>) -> Tokens<'_> {
+    let src = src.as_str();
     Tokens { list: List::new(src) }
 }
 
@@ -965,20 +1002,24 @@ pub struct MediaType<'a> {
 /// # Example
 ///
 /// ```
-/// use siparse::value;
+/// use siparse::{value, HeaderValue};
 ///
-/// let sdp = value::media_type("application/sdp")?;
+/// let input = HeaderValue::new("application/sdp")?;
+/// let sdp = value::media_type(input)?;
 /// assert_eq!((sdp.kind, sdp.subtype), ("application", "sdp"));
 ///
-/// let text = value::media_type("text/plain; charset=\"utf-8\"")?;
+/// let input = HeaderValue::new("text/plain; charset=\"utf-8\"")?;
+/// let text = value::media_type(input)?;
 /// let charset = text.params.iter().next().unwrap();
 /// assert_eq!((charset.name, charset.value), ("charset", Some("\"utf-8\"")));
 ///
-/// assert!(value::media_type("text/plain;charset").is_err());
+/// let input = HeaderValue::new("text/plain;charset")?;
+/// assert!(value::media_type(input).is_err());
 /// # Ok::<(), siparse::Error>(())
 /// ```
 #[inline]
-pub fn media_type(src: &str) -> Result<MediaType<'_>, Error> {
+pub fn media_type(src: HeaderValue<'_>) -> Result<MediaType<'_>, Error> {
+    let src = src.as_str();
     let invalid = Error::media_type();
 
     let (kind, subtype, rest) = type_and_subtype(src).ok_or(invalid)?;
@@ -1021,9 +1062,10 @@ pub fn media_type(src: &str) -> Result<MediaType<'_>, Error> {
 /// # Example
 ///
 /// ```
-/// use siparse::value;
+/// use siparse::{value, HeaderValue};
 ///
-/// let mut accept = value::media_ranges("application/sdp, text/*;q=0.5, */*;q=0");
+/// let input = HeaderValue::new("application/sdp, text/*;q=0.5, */*;q=0")?;
+/// let mut accept = value::media_ranges(input);
 /// let sdp = accept.next().unwrap()?;
 /// assert_eq!((sdp.kind, sdp.subtype), ("application", "sdp"));
 /// let text = accept.next().unwrap()?;
@@ -1031,11 +1073,13 @@ pub fn media_type(src: &str) -> Result<MediaType<'_>, Error> {
 /// assert_eq!(accept.next().unwrap()?.kind, "*");
 /// assert!(accept.next().is_none());
 ///
-/// assert!(value::media_ranges("*/sdp").next().unwrap().is_err());
+/// let input = HeaderValue::new("*/sdp")?;
+/// assert!(value::media_ranges(input).next().unwrap().is_err());
 /// # Ok::<(), siparse::Error>(())
 /// ```
 #[inline]
-pub fn media_ranges(src: &str) -> MediaRanges<'_> {
+pub fn media_ranges(src: HeaderValue<'_>) -> MediaRanges<'_> {
+    let src = src.as_str();
     MediaRanges { list: List::new(src) }
 }
 
@@ -1255,11 +1299,12 @@ impl FusedIterator for AuthParamsIter<'_> {}
 /// # Example
 ///
 /// ```
-/// use siparse::value;
+/// use siparse::{value, HeaderValue};
 ///
-/// let challenge = value::challenge(
+/// let input = HeaderValue::new(
 ///     "Digest realm=\"atlanta.com\", qop=\"auth,auth-int\", nonce=\"84a4cc6f3082\", algorithm=MD5",
 /// )?;
+/// let challenge = value::challenge(input)?;
 /// assert_eq!(challenge.scheme, "Digest");
 ///
 /// let params: Vec<_> = challenge.params.iter().map(|p| (p.name, p.value)).collect();
@@ -1272,7 +1317,8 @@ impl FusedIterator for AuthParamsIter<'_> {}
 /// # Ok::<(), siparse::Error>(())
 /// ```
 #[inline]
-pub fn challenge(src: &str) -> Result<Auth<'_>, Error> {
+pub fn challenge(src: HeaderValue<'_>) -> Result<Auth<'_>, Error> {
+    let src = src.as_str();
     auth(src)
 }
 
@@ -1289,19 +1335,22 @@ pub fn challenge(src: &str) -> Result<Auth<'_>, Error> {
 /// # Example
 ///
 /// ```
-/// use siparse::value;
+/// use siparse::{value, HeaderValue};
 ///
-/// let credentials = value::credentials(
+/// let input = HeaderValue::new(
 ///     "Digest username=\"bob\", realm=\"biloxi.com\", uri=\"sip:bob@biloxi.com\", qop=auth, nc=00000001",
 /// )?;
+/// let credentials = value::credentials(input)?;
 /// let nc = credentials.params.iter().find(|p| p.name.eq_ignore_ascii_case("nc"));
 /// assert_eq!(nc.map(|p| p.value), Some("00000001"));
 ///
-/// assert!(value::credentials("Digest").is_err());
+/// let input = HeaderValue::new("Digest")?;
+/// assert!(value::credentials(input).is_err());
 /// # Ok::<(), siparse::Error>(())
 /// ```
 #[inline]
-pub fn credentials(src: &str) -> Result<Auth<'_>, Error> {
+pub fn credentials(src: HeaderValue<'_>) -> Result<Auth<'_>, Error> {
+    let src = src.as_str();
     auth(src)
 }
 
@@ -1387,18 +1436,21 @@ pub struct TokenParam<'a> {
 /// # Example
 ///
 /// ```
-/// use siparse::value;
+/// use siparse::{value, HeaderValue};
 ///
-/// let disposition = value::token_param("session;handling=required")?;
+/// let input = HeaderValue::new("session;handling=required")?;
+/// let disposition = value::token_param(input)?;
 /// assert_eq!(disposition.token, "session");
 /// assert_eq!(disposition.params.as_str(), ";handling=required");
 ///
-/// let expires = value::token_param("1800;refresher=uas")?;
+/// let input = HeaderValue::new("1800;refresher=uas")?;
+/// let expires = value::token_param(input)?;
 /// assert_eq!(expires.token.parse::<u32>(), Ok(1800));
 /// # Ok::<(), siparse::Error>(())
 /// ```
 #[inline]
-pub fn token_param(src: &str) -> Result<TokenParam<'_>, Error> {
+pub fn token_param(src: HeaderValue<'_>) -> Result<TokenParam<'_>, Error> {
+    let src = src.as_str();
     let (value, rest) = token_param_prefix(src)?;
     if !scan::sws(rest).is_empty() {
         return Err(Error::token_param());
@@ -1423,11 +1475,12 @@ pub fn token_param(src: &str) -> Result<TokenParam<'_>, Error> {
 /// # Example
 ///
 /// ```
-/// use siparse::value;
+/// use siparse::{value, HeaderValue};
 ///
-/// let mut reasons = value::token_params(
+/// let input = HeaderValue::new(
 ///     "SIP;cause=200;text=\"Call completed elsewhere\", Q.850;cause=16",
-/// );
+/// )?;
+/// let mut reasons = value::token_params(input);
 /// let sip = reasons.next().unwrap()?;
 /// assert_eq!(sip.token, "SIP");
 /// assert_eq!(sip.params.iter().count(), 2);
@@ -1436,7 +1489,8 @@ pub fn token_param(src: &str) -> Result<TokenParam<'_>, Error> {
 /// # Ok::<(), siparse::Error>(())
 /// ```
 #[inline]
-pub fn token_params(src: &str) -> TokenParams<'_> {
+pub fn token_params(src: HeaderValue<'_>) -> TokenParams<'_> {
+    let src = src.as_str();
     TokenParams { list: List::new(src) }
 }
 
@@ -1541,11 +1595,12 @@ pub struct ViaParm<'a> {
 /// # Example
 ///
 /// ```
-/// use siparse::value;
+/// use siparse::{value, HeaderValue};
 ///
 /// let value = "SIP/2.0/UDP pc33.atlanta.example.com:5060;branch=z9hG4bK776asdhds\
 ///              ;received=2001:db8::9, SIP/2.0/TCP [2001:db8::1]";
-/// let mut vias = value::via_parms(value);
+/// let input = HeaderValue::new(value)?;
+/// let mut vias = value::via_parms(input);
 ///
 /// let top = vias.next().unwrap()?;
 /// assert_eq!((top.protocol, top.version, top.transport), ("SIP", "2.0", "UDP"));
@@ -1562,7 +1617,8 @@ pub struct ViaParm<'a> {
 /// # Ok::<(), siparse::Error>(())
 /// ```
 #[inline]
-pub fn via_parms(src: &str) -> ViaParms<'_> {
+pub fn via_parms(src: HeaderValue<'_>) -> ViaParms<'_> {
+    let src = src.as_str();
     ViaParms { list: List::new(src) }
 }
 
@@ -1600,7 +1656,7 @@ impl FusedIterator for ViaParms<'_> {}
 
 /// Reads a `via-parm` from the start of `src`, returning what follows it.
 fn via_parm_prefix(src: &str) -> Result<(ViaParm<'_>, &str), Error> {
-    let reader = via_parm(src)?;
+    let reader = via_parm_raw(src)?;
     let (params, rest) =
         params_of(reader.rest, via_param, Error::generic_param())?;
 
@@ -1643,11 +1699,12 @@ fn via_parm_prefix(src: &str) -> Result<(ViaParm<'_>, &str), Error> {
 /// # Example
 ///
 /// ```
-/// use siparse::value;
+/// use siparse::{value, HeaderValue};
 ///
 /// let value = "SIP/2.0/UDP pc33.atlanta.example.com;branch=z9hG4bK776asdhds;rport\
 ///              , SIP/2.0/UDP bigbox3.site3.atlanta.example.com";
-/// let mut top = value::via_parm(value)?;
+/// let input = HeaderValue::new(value)?;
+/// let mut top = value::via_parm(input)?;
 /// assert_eq!((top.transport, top.host, top.port), ("UDP", "pc33.atlanta.example.com", None));
 ///
 /// let mut branch = None;
@@ -1665,7 +1722,12 @@ fn via_parm_prefix(src: &str) -> Result<(ViaParm<'_>, &str), Error> {
 /// # Ok::<(), siparse::Error>(())
 /// ```
 #[inline]
-pub fn via_parm(src: &str) -> Result<ViaParmReader<'_>, Error> {
+pub fn via_parm(src: HeaderValue<'_>) -> Result<ViaParmReader<'_>, Error> {
+    via_parm_raw(src.as_str())
+}
+
+#[inline]
+fn via_parm_raw(src: &str) -> Result<ViaParmReader<'_>, Error> {
     let invalid = Error::via();
     let src = scan::sws(src);
 
@@ -1801,6 +1863,64 @@ mod tests {
     use std::{format, string::String, vec, vec::Vec};
 
     use super::*;
+
+    // Keep string fixtures concise while exercising the checked public
+    // boundary.
+    fn params(src: &str) -> Result<(Params<'_>, &str), Error> {
+        super::params(HeaderValue::new(src)?).map(|(p, r)| (p, r.as_str()))
+    }
+    fn address(src: &str) -> Result<Address<'_>, Error> {
+        super::address(HeaderValue::new(src)?)
+    }
+    fn addresses(src: &str) -> Addresses<'_> {
+        super::addresses(
+            HeaderValue::new(src).expect("fixture has header-value syntax"),
+        )
+    }
+    fn cseq(src: &str) -> Result<CSeq<'_>, Error> {
+        super::cseq(HeaderValue::new(src)?)
+    }
+    fn call_id(src: &str) -> Result<&str, Error> {
+        super::call_id(HeaderValue::new(src)?)
+    }
+    fn call_id_params(src: &str) -> Result<CallIdParams<'_>, Error> {
+        super::call_id_params(HeaderValue::new(src)?)
+    }
+    fn tokens(src: &str) -> Tokens<'_> {
+        super::tokens(
+            HeaderValue::new(src).expect("fixture has header-value syntax"),
+        )
+    }
+    fn media_type(src: &str) -> Result<MediaType<'_>, Error> {
+        super::media_type(HeaderValue::new(src)?)
+    }
+    fn media_ranges(src: &str) -> MediaRanges<'_> {
+        super::media_ranges(
+            HeaderValue::new(src).expect("fixture has header-value syntax"),
+        )
+    }
+    fn challenge(src: &str) -> Result<Auth<'_>, Error> {
+        super::challenge(HeaderValue::new(src)?)
+    }
+    fn credentials(src: &str) -> Result<Auth<'_>, Error> {
+        super::credentials(HeaderValue::new(src)?)
+    }
+    fn token_param(src: &str) -> Result<TokenParam<'_>, Error> {
+        super::token_param(HeaderValue::new(src)?)
+    }
+    fn token_params(src: &str) -> TokenParams<'_> {
+        super::token_params(
+            HeaderValue::new(src).expect("fixture has header-value syntax"),
+        )
+    }
+    fn via_parms(src: &str) -> ViaParms<'_> {
+        super::via_parms(
+            HeaderValue::new(src).expect("fixture has header-value syntax"),
+        )
+    }
+    fn via_parm(src: &str) -> Result<ViaParmReader<'_>, Error> {
+        super::via_parm(HeaderValue::new(src)?)
+    }
     use crate::{
         token::{is_addr_spec_token, is_word},
         ErrorKind,
@@ -2375,7 +2495,8 @@ mod tests {
                 assert_eq!(params(&param).is_ok(), valid, "{param}");
                 let address = format!("<sip:a@example.com>{param}");
                 assert_eq!(
-                    super::address(&address).is_ok(),
+                    super::address(HeaderValue::new(&address).unwrap())
+                        .is_ok(),
                     valid,
                     "{address}"
                 );

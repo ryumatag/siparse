@@ -1,7 +1,7 @@
 use std::hint::black_box as bb;
 
 use criterion::Criterion;
-use siparse::value;
+use siparse::{value, HeaderValue};
 
 use crate::benchmark;
 
@@ -12,6 +12,7 @@ pub(super) fn value(c: &mut Criterion) {
         ("ipv4", "SIP/2.0/UDP 192.0.2.4"),
         ("ipv6", "SIP/2.0/UDP [2001:db8::192.0.2.4]"),
     ] {
+        let input = HeaderValue::new(input).unwrap();
         benchmark(
             c,
             format!("value/via_host/{category}"),
@@ -26,6 +27,7 @@ pub(super) fn value(c: &mut Criterion) {
         );
     }
     let bracketed = "<sip:alice@example.com>;x=[2001:db8::1]";
+    let bracketed = HeaderValue::new(bracketed).unwrap();
     benchmark(c, "value/address/host_param", bracketed.len() as u64, |b| {
         b.iter(|| {
             let address = bb(value::address(bb(bracketed))).unwrap();
@@ -48,6 +50,7 @@ pub(super) fn value(c: &mut Criterion) {
     ];
 
     for (category, input) in addresses {
+        let input = HeaderValue::new(input).unwrap();
         let uri_len = value::address(input).unwrap().uri.len();
         benchmark(
             c,
@@ -67,6 +70,7 @@ pub(super) fn value(c: &mut Criterion) {
         "<sip:p1.example.com;lr>, <sip:p2.example.com;lr;transport=tcp>,",
         "\r\n <sip:[2001:db8::1]:5060;lr>",
     );
+    let route = HeaderValue::new(route).unwrap();
     benchmark(c, "value/addresses/route", route.len() as u64, |b| {
         b.iter(|| {
             let mut count = 0;
@@ -96,6 +100,7 @@ pub(super) fn value(c: &mut Criterion) {
         ),
     ];
     for (category, input, count) in vias {
+        let input = HeaderValue::new(input).unwrap();
         benchmark(
             c,
             format!("value/via_parms/{category}"),
@@ -120,6 +125,7 @@ pub(super) fn value(c: &mut Criterion) {
         ";rport=49154;branch=z9hG4bK776asdhds;x-trace=\"a;b\",",
         "SIP/2.0/UDP pc33.atlanta.example.com;branch=z9hG4bK776asdhdt",
     );
+    let proxied = HeaderValue::new(proxied).unwrap();
     benchmark(c, "value/via_parms/proxied", proxied.len() as u64, |b| {
         b.iter(|| {
             let top = value::via_parms(bb(proxied)).next().unwrap().unwrap();
@@ -149,6 +155,7 @@ pub(super) fn value(c: &mut Criterion) {
     // The Content-Type of an offer, and the Accept of a UA that takes SDP and
     // multipart bodies.
     let content_type = "application/sdp";
+    let content_type = HeaderValue::new(content_type).unwrap();
     benchmark(c, "value/media_type", content_type.len() as u64, |b| {
         b.iter(|| {
             let found = bb(value::media_type(bb(content_type))).unwrap();
@@ -157,6 +164,7 @@ pub(super) fn value(c: &mut Criterion) {
     });
 
     let accept = "application/sdp, multipart/mixed;q=0.5, */*;q=0.1";
+    let accept = HeaderValue::new(accept).unwrap();
     benchmark(c, "value/media_ranges", accept.len() as u64, |b| {
         b.iter(|| {
             let mut n = 0;
@@ -174,7 +182,7 @@ pub(super) fn value(c: &mut Criterion) {
             "challenge",
             "Digest realm=\"atlanta.example.com\", qop=\"auth\", \
              nonce=\"f84f1cec41e6cbe5aea9c8e88d359\", opaque=\"\", algorithm=MD5",
-            value::challenge as fn(&str) -> Result<value::Auth<'_>, siparse::Error>,
+            value::challenge as fn(HeaderValue<'_>) -> Result<value::Auth<'_>, siparse::Error>,
             5,
         ),
         (
@@ -188,6 +196,7 @@ pub(super) fn value(c: &mut Criterion) {
         ),
     ];
     for (thing, input, read, count) in auth {
+        let input = HeaderValue::new(input).unwrap();
         benchmark(c, format!("value/{thing}"), input.len() as u64, |b| {
             b.iter(|| {
                 let found = bb(read(bb(input))).unwrap();
@@ -199,6 +208,7 @@ pub(super) fn value(c: &mut Criterion) {
     // A Content-Disposition, and the Reason a forking proxy puts in its
     // CANCEL.
     let disposition = "session;handling=required";
+    let disposition = HeaderValue::new(disposition).unwrap();
     benchmark(c, "value/token_param", disposition.len() as u64, |b| {
         b.iter(|| {
             let found = bb(value::token_param(bb(disposition))).unwrap();
@@ -208,6 +218,7 @@ pub(super) fn value(c: &mut Criterion) {
 
     let reason =
         "SIP;cause=200;text=\"Call completed elsewhere\", Q.850;cause=16";
+    let reason = HeaderValue::new(reason).unwrap();
     benchmark(c, "value/token_params", reason.len() as u64, |b| {
         b.iter(|| {
             let mut n = 0;
@@ -221,6 +232,7 @@ pub(super) fn value(c: &mut Criterion) {
 
     // The option tags a UA lists in Supported.
     let tags = "100rel, timer, replaces, norefersub";
+    let tags = HeaderValue::new(tags).unwrap();
     benchmark(c, "value/tokens", tags.len() as u64, |b| {
         b.iter(|| {
             let mut n = 0;
@@ -235,6 +247,7 @@ pub(super) fn value(c: &mut Criterion) {
     // The values that match a response to its transaction and a request to
     // its dialog.
     let cseq = "314159 INVITE";
+    let cseq = HeaderValue::new(cseq).unwrap();
     benchmark(c, "value/cseq", cseq.len() as u64, |b| {
         b.iter(|| {
             let found = bb(value::cseq(bb(cseq))).unwrap();
@@ -243,6 +256,7 @@ pub(super) fn value(c: &mut Criterion) {
     });
 
     let call_id = "a84b4c76e66710@pc33.atlanta.example.com";
+    let call_id = HeaderValue::new(call_id).unwrap();
     benchmark(c, "value/call_id", call_id.len() as u64, |b| {
         b.iter(|| {
             let found = bb(value::call_id(bb(call_id))).unwrap();
@@ -252,6 +266,7 @@ pub(super) fn value(c: &mut Criterion) {
 
     // The Replaces of an attended transfer.
     let replaces = "98732@sip.example.com;from-tag=r33th4x0r;to-tag=ff87ff";
+    let replaces = HeaderValue::new(replaces).unwrap();
     benchmark(c, "value/call_id_params", replaces.len() as u64, |b| {
         b.iter(|| {
             let found = bb(value::call_id_params(bb(replaces))).unwrap();
@@ -261,6 +276,7 @@ pub(super) fn value(c: &mut Criterion) {
 
     // Parameters as they follow a Via's `sent-by`, read and walked.
     let params = ";branch=z9hG4bK776asdhds;rport;received=192.0.2.4;ttl=16";
+    let params = HeaderValue::new(params).unwrap();
     benchmark(c, "value/params/typical", params.len() as u64, |b| {
         b.iter(|| {
             let (list, rest) = bb(value::params(bb(params))).unwrap();

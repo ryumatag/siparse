@@ -77,6 +77,28 @@ of a head, not the grammar of a particular header, so `check::request_uri`
 accepts URIs that [`uri::sip_uri`] rejects. Each check also has a `const fn`
 form for constants.
 
+Header values carry their head-level validation in [`HeaderValue`]. Pass a
+parsed header's `value` directly to [`scan`] or [`value`]. For a standalone
+string, use [`HeaderValue::new`] first. To keep or inspect the raw spelling,
+call [`HeaderValue::as_str`]. The checked type does not select a header
+grammar or decode anything.
+
+# Migrating from 0.4
+
+[`Header::value`], [`check::header_value`] and [`check::header_value_const`]
+now expose [`HeaderValue`] instead of `&str`. Pass that value directly into
+[`scan`] and [`value`]. Use `.as_str()` when raw text is needed. An owned
+consumer that maintains the same validation invariant can borrow through
+[`HeaderValue::from_str_unchecked`] under its documented safety contract.
+
+[`scan::separator`] takes a [`scan::Separator`] instead of `char`.
+Lexical scans and [`value::params`] return a checked remainder, so scans
+can be composed without repeating validation. [`scan::host`] now checks
+host structure, including RFC 5954's IP grammar, rather than only the
+character set. Value and URI components still return raw borrowed `&str`.
+
+# Value and URI productions
+
 Within [`value`] and [`uri`]:
 
 * [`value::address`] reads a From or To value, and [`value::addresses`] a
@@ -175,7 +197,7 @@ let value_ranges: Vec<_> = head
     .headers
     .iter()
     .map(|header| {
-        let start = header.value.as_ptr() as usize - base;
+        let start = header.value.as_str().as_ptr() as usize - base;
         start..start + header.value.len()
     })
     .collect();
@@ -312,6 +334,7 @@ mod macros;
 pub mod check;
 mod error;
 pub mod frame;
+mod header_value;
 mod host;
 mod iter;
 mod parse;
@@ -325,6 +348,7 @@ pub mod value;
 #[doc(inline)]
 pub use self::{
     error::{Error, ErrorKind},
+    header_value::HeaderValue,
     parse::{
         AnyHead, CompleteRequestLine, CompleteStartLine, CompleteStatusLine,
         Header, HeaderBuf, Headers, MessageHead, RequestHead, RequestLine,

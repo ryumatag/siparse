@@ -2,7 +2,9 @@
 Checks single elements before they are written into a head.
 
 Each function checks that the whole input is one element, such as a header
-value, and returns it as a `&str` borrowed from the input. A crate that
+value, and returns borrowed text. Header-value checks return a
+[`HeaderValue`], which can feed [`crate::scan`] and [`crate::value`] without
+checking the envelope again. Other checks return `&str`. A crate that
 builds SIP messages from parts can use these to accept exactly what the
 parser accepts in a head, without copying the grammar. The checks cover what
 a head allows, not the grammar of a particular header or URI. To read a
@@ -31,12 +33,12 @@ says where a check fails. See [error offsets](#error-offsets).
 use siparse::{check, ErrorKind};
 
 let value = check::header_value(b"\"Bob \\\x01\" <sip:bob@biloxi.example.com>")?;
-assert!(value.starts_with("\"Bob"));
+assert!(value.as_str().starts_with("\"Bob"));
 
 let err = check::header_value(b"one\r\ntwo").unwrap_err();
 assert_eq!(err.kind(), ErrorKind::HeaderValue);
 
-const CONTENT_TYPE: &str = match check::header_value_const(b"application/sdp") {
+const CONTENT_TYPE: siparse::HeaderValue<'static> = match check::header_value_const(b"application/sdp") {
     Ok(value) => value,
     Err(_) => panic!("invalid header value"),
 };
@@ -85,6 +87,7 @@ use crate::{
         is_header_name_token, is_header_value_ascii, is_method_token,
         is_reason_phrase_octet, is_uri_token,
     },
+    HeaderValue,
 };
 
 /// Checks that `src` is a SIP method, an RFC 3261 `token`.
@@ -155,8 +158,9 @@ pub fn header_name(src: &[u8]) -> Result<&str, Error> {
 ///   followed by `SP` or `HTAB`, a control that no backslash escapes, or
 ///   invalid UTF-8.
 #[inline]
-pub fn header_value(src: &[u8]) -> Result<&str, Error> {
+pub fn header_value(src: &[u8]) -> Result<HeaderValue<'_>, Error> {
     whole(src, parse::header_value::<Whole>, Error::header_value())
+        .map(HeaderValue::from_validated)
 }
 
 /// Runs a production on `src` as one whole token.
@@ -396,8 +400,25 @@ const_forms! {
         reason_phrase_fault;
     header_name, header_name_const, header_name_error_offset,
         header_name_fault;
-    header_value, header_value_const, header_value_error_offset,
-        header_value_fault;
+}
+
+/// Checks a complete header value in a `const` context.
+///
+/// # Errors
+///
+/// Returns the same errors as [`header_value`].
+pub const fn header_value_const(src: &[u8]) -> Result<HeaderValue<'_>, Error> {
+    // SAFETY: The fault scan validates every byte, including modern UTF-8.
+    match unsafe { into_result(src, header_value_fault(src)) } {
+        Ok(text) => Ok(HeaderValue::from_validated(text)),
+        Err(error) => Err(error),
+    }
+}
+
+/// Returns the offset where [`header_value`] fails, or `None` on success.
+/// See [error offsets](self#error-offsets).
+pub const fn header_value_error_offset(src: &[u8]) -> Option<usize> {
+    into_offset(header_value_fault(src))
 }
 
 #[cfg(test)]
@@ -406,6 +427,16 @@ mod tests {
 
     use super::*;
     use crate::{AnyHead, ErrorKind, HeaderBuf, StartLine, Status};
+
+    fn header_value(src: &[u8]) -> Result<&str, Error> {
+        super::header_value(src).map(HeaderValue::as_str)
+    }
+    const fn header_value_const(src: &[u8]) -> Result<&str, Error> {
+        match super::header_value_const(src) {
+            Ok(value) => Ok(value.as_str()),
+            Err(error) => Err(error),
+        }
+    }
 
     type Check = fn(&[u8]) -> Result<&str, Error>;
 
@@ -479,7 +510,7 @@ mod tests {
             ("request_uri", StartLine::Request(line)) => line.uri?,
             ("reason_phrase", StartLine::Status(line)) => line.reason_phrase?,
             ("header_name", _) => head.headers.first()?.name,
-            ("header_value", _) => head.headers.first()?.value,
+            ("header_value", _) => head.headers.first()?.value.as_str(),
             _ => return None,
         };
         Some(token.as_bytes().to_vec())

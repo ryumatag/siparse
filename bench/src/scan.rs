@@ -1,11 +1,11 @@
 use std::hint::black_box as bb;
 
 use criterion::Criterion;
-use siparse::scan;
+use siparse::{scan, HeaderValue};
 
 use crate::benchmark;
 
-type Scan = fn(&str) -> Option<(&str, &str)>;
+type Scan = fn(HeaderValue<'_>) -> Option<(&str, HeaderValue<'_>)>;
 
 pub(super) fn scan(c: &mut Criterion) {
     // Each element as it appears in a typical value, followed by what ends
@@ -24,6 +24,7 @@ pub(super) fn scan(c: &mut Criterion) {
     ];
 
     for (thing, input, f) in cases {
+        let input = HeaderValue::new(input).unwrap();
         let (element, _) = f(input).unwrap();
         let len = element.len();
         benchmark(c, format!("scan/{thing}"), len as u64, |b| {
