@@ -100,7 +100,7 @@ pub struct Header<'buf> {
     /// after an unpaired backslash. Header-specific quoted-string and
     /// comment syntax is left to the consumer. See the crate's
     /// [header value policy](crate#header-values).
-    pub value: &'buf str,
+    pub value: crate::HeaderValue<'buf>,
 }
 
 /// An iterator over the lines of a folded header value.
@@ -315,7 +315,7 @@ impl<'buf> Header<'buf> {
     /// empty one, yields itself as its only line.
     ///
     /// The parser only stores `CRLF` in a value as part of a fold. For a
-    /// `Header` built by hand, this splits at every `CRLF`.
+    /// `Header` built by hand, its checked value guarantees the same policy.
     ///
     /// [RFC 3261 section 7.3.1]: https://www.rfc-editor.org/rfc/rfc3261#section-7.3.1
     ///
@@ -326,7 +326,7 @@ impl<'buf> Header<'buf> {
     ///
     /// let header = Header {
     ///     name: "Subject",
-    ///     value: "I know you're there,\r\n   pick up the phone",
+    ///     value: siparse::HeaderValue::new("I know you're there,\r\n   pick up the phone").unwrap(),
     /// };
     ///
     /// let lines: Vec<&str> = header.value_lines().collect();
@@ -335,7 +335,7 @@ impl<'buf> Header<'buf> {
     /// ```
     #[inline]
     pub fn value_lines(&self) -> ValueLines<'buf> {
-        ValueLines { rest: Some(self.value) }
+        ValueLines { rest: Some(self.value.as_str()) }
     }
 }
 
@@ -423,7 +423,10 @@ fn parse_header<'buf>(buf: &mut Bytes<'buf>) -> Result<Option<Header<'buf>>> {
 
     let value = complete!(parse_header_value(buf));
 
-    Ok(Status::Complete(Some(Header { name, value })))
+    Ok(Status::Complete(Some(Header {
+        name,
+        value: crate::HeaderValue::from_validated(value),
+    })))
 }
 
 #[inline]
@@ -706,7 +709,12 @@ mod tests {
     }
 
     fn lines(value: &str) -> Vec<&str> {
-        Header { name: "Subject", value }.value_lines().collect()
+        Header {
+            name: "Subject",
+            value: crate::HeaderValue::new(value).unwrap(),
+        }
+        .value_lines()
+        .collect()
     }
 
     #[test]
@@ -730,7 +738,10 @@ mod tests {
 
     #[test]
     fn value_lines_is_fused() {
-        let header = Header { name: "Subject", value: "a\r\n b" };
+        let header = Header {
+            name: "Subject",
+            value: crate::HeaderValue::new("a\r\n b").unwrap(),
+        };
         let mut lines = header.value_lines();
         assert_eq!(lines.next(), Some("a"));
         assert_eq!(lines.next(), Some("b"));
@@ -768,8 +779,8 @@ mod tests {
             unfolded
         }
 
-        // The parser never stores a bare `CR` or a `CRLF` without whitespace
-        // after it, but a `Header` built by hand can hold them.
+        // Both parsed and manually constructed headers now require folds
+        // to be complete. Keep invalid combinations to check that boundary.
         const PIECES: [&str; 7] =
             ["a", "\u{e9}", " ", "\t", "\r\n ", "\r\n", "\r"];
         let mut value = String::new();
@@ -779,6 +790,9 @@ mod tests {
                 for _ in 0..len {
                     value.push_str(PIECES[n % PIECES.len()]);
                     n /= PIECES.len();
+                }
+                if crate::HeaderValue::new(&value).is_err() {
+                    continue;
                 }
                 assert_eq!(
                     lines(&value).join(" "),

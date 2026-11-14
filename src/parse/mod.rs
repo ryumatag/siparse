@@ -1274,7 +1274,7 @@ mod tests {
             line.uri.unwrap(),
             line.version.unwrap(),
             head.headers[0].name,
-            head.headers[0].value,
+            head.headers[0].value.as_str(),
         ];
         for token in tokens {
             let token_range = token.as_bytes().as_ptr_range();
@@ -1483,7 +1483,7 @@ mod tests {
                             &buf[value_start..value_end]
                         );
                         assert_eq!(
-                            value.as_ptr(),
+                            value.as_str().as_ptr(),
                             buf[value_start..].as_ptr()
                         );
                     }
